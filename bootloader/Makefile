@@ -7,7 +7,7 @@ SIZE    = arm-none-eabi-size
 TARGET  = bootloader
 
 # ---------- Fichiers sources ----------
-SRCS    = main.c startup.s src/crc.c
+SRCS = main.c startup.s src/crc.c src/flash.c
 
 # ---------- Options de compilation ----------
 CPU     = -mcpu=cortex-m4 -mthumb
