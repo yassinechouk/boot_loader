@@ -60,7 +60,7 @@ typedef enum {
 } fw_state_t;
 
 /* =========================================================
- * Structure de metadonnees (28 octets, sans padding)
+ * Structure de metadonnees (32 octets, sans padding)
  *
  * Ecrite en double exemplaire dans deux pages distinctes.
  * A chaque mise a jour, seule la page inactive est effacee :
@@ -75,8 +75,21 @@ typedef enum {
  * le bootloader sortirait des limites de la flash en tentant de
  * verifier le firmware.
  *
- * Le CRC couvre les 24 octets precedents. Il detecte l'ecriture
+ * Le CRC couvre les 28 octets precedents. Il detecte l'ecriture
  * incomplete comme la degradation d'une cellule au fil du temps.
+ *
+ * La taille de 32 octets n'est pas fortuite : le controleur flash
+ * ne programme que par double-mot de 64 bits, donc par multiples de
+ * 8 octets. Une structure de 28 octets aurait impose d'ecrire 32
+ * octets pour une structure qui en fait 28, creant un ecart
+ * permanent entre sizeof() et ce qui est reellement en flash. Le
+ * champ reserved absorbe la difference.
+ *
+ * reserved doit toujours etre mis a zero. Ce n'est pas necessaire
+ * a la correction — le CRC valide ce qui a ete ecrit, quel qu'il
+ * soit — mais cela garde les dumps memoire lisibles et permettra,
+ * le jour ou un de ces octets sera utilise, de distinguer une
+ * valeur ecrite par une version recente d'un residu.
  *
  * La copie faisant foi est celle dont le compteur est le plus
  * eleve parmi celles qui sont valides.
@@ -94,9 +107,10 @@ typedef struct {
     uint8_t  active_slot;       /* SLOT_A ou SLOT_B                      */
     uint8_t  state;             /* fw_state_t                            */
     uint8_t  boot_fail_count;   /* demarrages rates consecutifs          */
-    uint8_t  reserved;          /* extension future                      */
-    uint32_t meta_crc32;        /* CRC32 des 24 octets precedents        */
-} metadata_t;
+    uint8_t  reserved[5];       /* extension future, toujours a zero     */
+    uint32_t meta_crc32;        /* CRC32 des 28 octets precedents        */
+} metadata_t;                   /* 32 octets : multiple de l'unite       */
+                                /* d'ecriture flash (double-mot 64 bits) */
 
 #define METADATA_MAGIC          0x424C4D44UL   /* "BLMD" */
 #define METADATA_SIZE           sizeof(metadata_t)

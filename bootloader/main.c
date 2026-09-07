@@ -2,21 +2,19 @@
 #include "crc.h"
 #include "flash.h"
 #include "metadata.h"
+#include "metadata_mgr.h"
 
 /* ---------- Adresses de base ---------- */
 #define RCC_BASE        0x40021000UL
 #define GPIOA_BASE      0x48000000UL
 #define USART2_BASE     0x40004400UL
 
-/* ---------- Registres RCC ---------- */
 #define RCC_AHB2ENR     (*(volatile uint32_t *)(RCC_BASE + 0x4C))
 #define RCC_APB1ENR1    (*(volatile uint32_t *)(RCC_BASE + 0x58))
 
-/* ---------- Registres GPIOA ---------- */
 #define GPIOA_MODER     (*(volatile uint32_t *)(GPIOA_BASE + 0x00))
 #define GPIOA_AFRL      (*(volatile uint32_t *)(GPIOA_BASE + 0x20))
 
-/* ---------- Registres USART2 ---------- */
 #define USART2_CR1      (*(volatile uint32_t *)(USART2_BASE + 0x00))
 #define USART2_BRR      (*(volatile uint32_t *)(USART2_BASE + 0x0C))
 #define USART2_ISR      (*(volatile uint32_t *)(USART2_BASE + 0x1C))
@@ -57,10 +55,23 @@ static void uart_hex32(uint32_t v)
     }
 }
 
-static void resultat(flash_status_t st, flash_status_t attendu)
+static void uart_dec(uint32_t v)
 {
-    uart_hex32((uint32_t)st);
-    uart_puts(st == attendu ? "   OK\r\n" : "   ECHEC\r\n");
+    char buf[11];
+    int i = 0;
+    if (v == 0) { uart_putc('0'); return; }
+    while (v) { buf[i++] = (char)('0' + (v % 10)); v /= 10; }
+    while (i--) uart_putc(buf[i]);
+}
+
+static int nb_ok = 0, nb_ko = 0;
+
+static void chk(const char *nom, int cond)
+{
+    uart_puts(cond ? "  ok    " : "  ECHEC ");
+    uart_puts(nom);
+    uart_puts("\r\n");
+    if (cond) nb_ok++; else nb_ko++;
 }
 
 
@@ -69,68 +80,83 @@ int main(void)
     uart_init();
     crc32_init();
 
-    uart_puts("\r\n=== TEST MODULE FLASH ===\r\n");
-    uart_puts("cible : slot B (banque 2)\r\n\r\n");
+    uart_puts("\r\n=== TEST METADATA ===\r\n");
 
-    const uint32_t addr = SLOT_B_ADDR;
+    metadata_t m;
+    metadata_t r;
 
-    /* --- 1. Effacement d'une page --- */
-    uart_puts("erase page      -> ");
-    resultat(flash_erase_page(addr), FLASH_OK);
+    /* --- Etat vierge --- */
+    uart_puts("\r\n-- effacement initial --\r\n");
+    chk("erase_all", metadata_erase_all() == META_OK);
+    chk("aucune copie valide", metadata_read(&r) == 0);
 
-    /* --- 2. La page doit etre vierge --- */
-    uart_puts("page vierge     -> ");
-    uart_hex32((uint32_t)flash_is_erased(addr, FLASH_PAGE_SIZE));
-    uart_puts("   attendu 0x00000001\r\n");
+    /* --- Premiere ecriture --- */
+    uart_puts("\r\n-- premiere ecriture --\r\n");
+    for (unsigned i = 0; i < sizeof(m); i++) ((uint8_t *)&m)[i] = 0;
+    m.fw_size     = 12345;
+    m.fw_crc32    = 0xAABBCCDD;
+    m.fw_version  = 0x00010203;
+    m.active_slot = SLOT_A;
+    m.state       = STATE_VALID;
 
-    /* --- 3. Ecriture de 16 octets --- */
-    static const uint8_t motif[16] = {
-        0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02, 0x03, 0x04,
-        0xCA, 0xFE, 0xBA, 0xBE, 0x05, 0x06, 0x07, 0x08
-    };
+    chk("ecriture acceptee", metadata_write(&m) == META_OK);
+    chk("relecture ok", metadata_read(&r) == 1);
+    chk("compteur = 1", r.counter == 1);
+    chk("fw_size conserve", r.fw_size == 12345);
+    chk("fw_crc32 conserve", r.fw_crc32 == 0xAABBCCDD);
+    chk("magic pose", r.magic == METADATA_MAGIC);
+    chk("reserved a zero", r.reserved[0] == 0 && r.reserved[4] == 0);
+    chk("page A ecrite", !flash_is_erased(META_PAGE_A_ADDR, 32));
+    chk("page B vierge", flash_is_erased(META_PAGE_B_ADDR, 32));
 
-    uart_puts("write 16 o      -> ");
-    resultat(flash_write(addr, motif, 16), FLASH_OK);
+    /* --- Alternance --- */
+    uart_puts("\r\n-- alternance des pages --\r\n");
+    m.fw_size = 200;
+    chk("2e ecriture", metadata_write(&m) == META_OK);
+    metadata_read(&r);
+    chk("compteur = 2", r.counter == 2);
+    chk("fw_size = 200", r.fw_size == 200);
+    chk("page B ecrite", !flash_is_erased(META_PAGE_B_ADDR, 32));
 
-    /* --- 4. Relecture directe --- */
-    uart_puts("relu [0..3]     -> ");
-    uart_hex32(*(volatile uint32_t *)addr);
-    uart_puts("   attendu 0xEFBEADDE\r\n");
+    m.fw_size = 300;
+    chk("3e ecriture", metadata_write(&m) == META_OK);
+    metadata_read(&r);
+    chk("compteur = 3", r.counter == 3);
+    chk("fw_size = 300", r.fw_size == 300);
 
-    uart_puts("relu [8..11]    -> ");
-    uart_hex32(*(volatile uint32_t *)(addr + 8));
-    uart_puts("   attendu 0xBEBAFECA\r\n");
+    /* --- Les champs imposes par le module --- */
+    uart_puts("\r\n-- champs non falsifiables --\r\n");
+    m.counter    = 9999;
+    m.magic      = 0x11111111;
+    m.meta_crc32 = 0xDEADBEEF;
+    m.fw_size    = 444;
+    chk("ecriture", metadata_write(&m) == META_OK);
+    metadata_read(&r);
+    chk("counter ignore", r.counter == 4);
+    chk("magic corrige", r.magic == METADATA_MAGIC);
+    chk("copie valide", metadata_is_valid(&r));
+    chk("fw_size repris", r.fw_size == 444);
 
-    /* --- 5. CRC du contenu ecrit --- */
-    uart_puts("crc du motif    -> ");
-    uart_hex32(crc32_compute((const uint8_t *)addr, 16));
+    /* --- Persistance apres reset --- */
+    uart_puts("\r\n-- etat courant --\r\n");
+    uart_puts("  compteur    : ");  uart_dec(r.counter);      uart_puts("\r\n");
+    uart_puts("  fw_size     : ");  uart_dec(r.fw_size);      uart_puts("\r\n");
+    uart_puts("  fw_crc32    : ");  uart_hex32(r.fw_crc32);   uart_puts("\r\n");
+    uart_puts("  slot actif  : ");  uart_putc((char)('A' + r.active_slot));
     uart_puts("\r\n");
+    uart_puts("  etat        : ");  uart_dec(r.state);        uart_puts("\r\n");
 
-    uart_puts("crc de la source-> ");
-    uart_hex32(crc32_compute(motif, 16));
-    uart_puts("   doit etre identique\r\n\r\n");
+    /* --- Arguments nuls --- */
+    uart_puts("\r\n-- arguments nuls --\r\n");
+    chk("read(NULL)", metadata_read(0) == 0);
+    chk("write(NULL)", metadata_write(0) == META_ERR_ARG);
 
-    /* --- 6. Cas d'erreur : adresse non alignee sur 8 --- */
-    uart_puts("addr non 8      -> ");
-    resultat(flash_write(addr + 1, motif, 8), FLASH_ERR_ALIGN);
-
-    /* --- 7. Cas d'erreur : longueur non multiple de 8 --- */
-    uart_puts("len non 8       -> ");
-    resultat(flash_write(addr + 64, motif, 5), FLASH_ERR_ALIGN);
-
-    /* --- 8. Cas d'erreur : reecriture sans effacement --- */
-    uart_puts("reecriture      -> ");
-    resultat(flash_write(addr, motif, 8), FLASH_ERR_PROG);
-
-    /* --- 9. Cas d'erreur : hors flash --- */
-    uart_puts("hors flash      -> ");
-    resultat(flash_write(0x20000000UL, motif, 8), FLASH_ERR_RANGE);
-
-    /* --- 10. Cas d'erreur : page non alignee --- */
-    uart_puts("page non alignee-> ");
-    resultat(flash_erase_page(addr + 100), FLASH_ERR_ALIGN);
-
-    uart_puts("\r\n=== FIN ===\r\n");
+    /* --- Bilan --- */
+    uart_puts("\r\n=== ");
+    uart_dec((uint32_t)nb_ok);
+    uart_puts(" reussis, ");
+    uart_dec((uint32_t)nb_ko);
+    uart_puts(" echecs ===\r\n");
 
     while (1);
 }
