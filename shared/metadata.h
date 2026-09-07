@@ -60,15 +60,26 @@ typedef enum {
 } fw_state_t;
 
 /* =========================================================
- * Structure de metadonnees (24 octets, sans padding)
+ * Structure de metadonnees (28 octets, sans padding)
  *
  * Ecrite en double exemplaire dans deux pages distinctes.
  * A chaque mise a jour, seule la page inactive est effacee :
  * l'autre reste intacte et lisible, ce qui garantit qu'une
  * coupure d'alimentation ne detruit jamais les deux copies.
  *
+ * Une copie est valide si son magic correspond ET si son CRC est
+ * correct. Le magic seul ne suffit pas : il est ecrit dans le meme
+ * bloc de 8 octets que le compteur, donc une coupure apres la
+ * premiere ecriture laisserait un magic valide devant des champs
+ * encore a 0xFF. fw_size vaudrait alors 0xFFFFFFFF, soit 4 Go, et
+ * le bootloader sortirait des limites de la flash en tentant de
+ * verifier le firmware.
+ *
+ * Le CRC couvre les 24 octets precedents. Il detecte l'ecriture
+ * incomplete comme la degradation d'une cellule au fil du temps.
+ *
  * La copie faisant foi est celle dont le compteur est le plus
- * eleve parmi celles dont le magic est valide.
+ * eleve parmi celles qui sont valides.
  *
  * Le debordement du compteur 32 bits est ignore : l'endurance
  * de la flash (environ 10 000 cycles par page) constitue la
@@ -84,6 +95,7 @@ typedef struct {
     uint8_t  state;             /* fw_state_t                            */
     uint8_t  boot_fail_count;   /* demarrages rates consecutifs          */
     uint8_t  reserved;          /* extension future                      */
+    uint32_t meta_crc32;        /* CRC32 des 24 octets precedents        */
 } metadata_t;
 
 #define METADATA_MAGIC          0x424C4D44UL   /* "BLMD" */
