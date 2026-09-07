@@ -1,11 +1,10 @@
 #include <stdint.h>
+#include "crc.h"
 
 #define RCC_BASE        0x40021000UL
 #define GPIOA_BASE      0x48000000UL
 #define USART2_BASE     0x40004400UL
-#define CRC_BASE        0x40023000UL
 
-#define RCC_AHB1ENR     (*(volatile uint32_t *)(RCC_BASE + 0x48))
 #define RCC_AHB2ENR     (*(volatile uint32_t *)(RCC_BASE + 0x4C))
 #define RCC_APB1ENR1    (*(volatile uint32_t *)(RCC_BASE + 0x58))
 
@@ -16,14 +15,6 @@
 #define USART2_BRR      (*(volatile uint32_t *)(USART2_BASE + 0x0C))
 #define USART2_ISR      (*(volatile uint32_t *)(USART2_BASE + 0x1C))
 #define USART2_TDR      (*(volatile uint32_t *)(USART2_BASE + 0x28))
-
-#define CRC_DR_W        (*(volatile uint32_t *)(CRC_BASE + 0x00))
-#define CRC_DR_B        (*(volatile uint8_t  *)(CRC_BASE + 0x00))
-#define CRC_CR          (*(volatile uint32_t *)(CRC_BASE + 0x08))
-#define CRC_INIT_R      (*(volatile uint32_t *)(CRC_BASE + 0x10))
-#define CRC_POL_R       (*(volatile uint32_t *)(CRC_BASE + 0x14))
-
-#define CRCEN_BIT       12
 
 static void uart_init(void)
 {
@@ -59,56 +50,28 @@ static void uart_hex32(uint32_t v)
     }
 }
 
-static void crc_init(void)
-{
-    RCC_AHB1ENR |= (1U << CRCEN_BIT);
-
-    CRC_POL_R  = 0x04C11DB7UL;
-    CRC_INIT_R = 0xFFFFFFFFUL;
-
-    /* REV_IN = 01 (inversion par octet), REV_OUT = 0, POLYSIZE = 00 */
-    CRC_CR = (1U << 5);
-}
-
-static uint32_t crc_compute(const uint8_t *data, uint32_t len)
-{
-    CRC_CR |= (1U << 0);            /* RESET : recharge CRC_INIT */
-
-    for (uint32_t i = 0; i < len; i++) {
-        CRC_DR_B = data[i];         /* acces octet */
-    }
-
-    return CRC_DR_W;
-}
-
 int main(void)
 {
     uart_init();
-    crc_init();
+    crc32_init();
 
-    uart_puts("\r\n=== TEST CRC ===\r\n");
+    uart_puts("\r\n=== TEST MODULE CRC ===\r\n");
 
-    uart_puts("CRC_CR   = ");  uart_hex32(CRC_CR);     uart_puts("\r\n");
-    uart_puts("CRC_POL  = ");  uart_hex32(CRC_POL_R);  uart_puts("\r\n");
-    uart_puts("CRC_INIT = ");  uart_hex32(CRC_INIT_R); uart_puts("\r\n\r\n");
+    uart_puts("une passe      -> ");
+    uart_hex32(crc32_compute((const uint8_t *)"123456789", 9));
+    uart_puts("   attendu 0x9B63D02C\r\n");
 
-    const char *a = "123456789";
-    uart_puts("\"123456789\"  -> ");
-    uart_hex32(crc_compute((const uint8_t *)a, 9));
-    uart_puts("   python 0x9B63D02C\r\n");
+    /* API incrementale : le meme calcul en deux morceaux */
+    crc32_reset();
+    crc32_update((const uint8_t *)"12345", 5);
+    crc32_update((const uint8_t *)"6789", 4);
+    uart_puts("deux appels    -> ");
+    uart_hex32(crc32_get());
+    uart_puts("   attendu 0x9B63D02C\r\n");
 
-    const uint8_t z[4] = {0, 0, 0, 0};
-    uart_puts("4 zeros      -> ");
-    uart_hex32(crc_compute(z, 4));
-    uart_puts("   python 0xC704DD7B\r\n");
+    uart_puts("quatre zeros   -> ");
+    uart_hex32(crc32_compute((const uint8_t[]){0,0,0,0}, 4));
+    uart_puts("   attendu 0xC704DD7B\r\n");
 
-    const char *c = "STM32";
-    uart_puts("\"STM32\"      -> ");
-    uart_hex32(crc_compute((const uint8_t *)c, 5));
-    uart_puts("   python 0xF4F0FF62\r\n");
-
-     while (1) {
-        uart_puts("crc test alive\r\n");
-        for (volatile uint32_t i = 0; i < 400000; i++) { __asm__("nop"); }
-    }
+    while (1);
 }
