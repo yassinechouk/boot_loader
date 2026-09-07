@@ -4,7 +4,7 @@ OBJCOPY = arm-none-eabi-objcopy
 SIZE    = arm-none-eabi-size
 
 # ---------- Nom du projet ----------
-TARGET  = bootloader
+TARGET  = app
 
 # ---------- Fichiers sources ----------
 SRCS    = main.c startup.s
@@ -36,6 +36,7 @@ $(TARGET).elf: $(SRCS) linker.ld
 
 $(TARGET).bin: $(TARGET).elf
 	$(OBJCOPY) -O binary $< $@
+
 flash: $(TARGET).elf
 	openocd -f interface/stlink.cfg -f target/stm32l4x.cfg \
 	        -c "program $(TARGET).elf verify reset exit"

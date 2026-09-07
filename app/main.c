@@ -7,9 +7,6 @@
 #define GPIOA_BASE      0x48000000UL
 #define USART2_BASE     0x40004400UL
 
-/* ---------- Registre VTOR (System Control Block) ---------- */
-#define SCB_VTOR        (*(volatile uint32_t *)0xE000ED08UL)
-
 /* ---------- Registres RCC ---------- */
 #define RCC_AHB2ENR     (*(volatile uint32_t *)(RCC_BASE + 0x4C))
 #define RCC_APB1ENR1    (*(volatile uint32_t *)(RCC_BASE + 0x58))
@@ -63,31 +60,6 @@ static void uart_send_string(const char *s)
     }
 }
 
-static void uart_flush(void)
-{
-    while (!(USART2_ISR & (1U << 6)));   /* attendre TC */
-}
-
-static void jump_to_application(void)
-{
-    uint32_t app_stack = *(volatile uint32_t *)SLOT_A_ADDR;
-    uint32_t app_reset = *(volatile uint32_t *)(SLOT_A_ADDR + 4);
-
-    void (*app_entry)(void) = (void (*)(void))app_reset;
-
-    __asm__ volatile ("cpsid i");
-
-    USART2_CR1   = 0;
-    RCC_APB1ENR1 &= ~(1U << 17);
-
-    SCB_VTOR = SLOT_A_ADDR;
-
-    __asm__ volatile ("msr msp, %0" : : "r" (app_stack));
-    __asm__ volatile ("cpsie i");
-
-    app_entry();
-}
-
 int main(void)
 {
     RCC_AHB2ENR |= (1U << 0);
@@ -96,18 +68,11 @@ int main(void)
 
     uart_init();
 
-    uart_send_string("\r\n=== BOOTLOADER ===\r\n");
+    uart_send_string("\r\n### APPLICATION ###\r\n");
 
-    for (int i = 0; i < 4; i++) {
+    while (1) {
         GPIOA_ODR ^= (1U << LED_PIN);
-        delay(500000);
+        uart_send_string("app\r\n");
+        delay(100000);      /* 5x plus rapide que le bootloader */
     }
-
-    uart_send_string("Jumping to application...\r\n");
-    uart_flush();
-
-    jump_to_application();
-
-    uart_send_string("JUMP FAILED\r\n");
-    while (1);
 }
