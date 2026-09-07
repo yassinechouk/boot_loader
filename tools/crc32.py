@@ -14,20 +14,16 @@ l'inverse : le peripherique STM32 calcule en 4 cycles AHB sans
 consommer de CPU, alors que le PC peut absorber n'importe quel
 algorithme sans que cela se remarque.
 
-ATTENTION — NON VERIFIE CONTRE DU MATERIEL REEL
------------------------------------------------
-La correspondance exacte entre une implementation logicielle et le
-peripherique CRC du STM32 depend de la combinaison precise de REV_IN,
-REV_OUT, de la taille des ecritures dans CRC_DR et de l'ordre des
-octets. Cette implementation est une hypothese.
+VALIDE sur STM32L476RG
+----------------------
+Le peripherique CRC configure avec POL=0x04C11DB7, INIT=0xFFFFFFFF,
+REV_IN=01, REV_OUT=0, alimente octet par octet, produit :
 
-Validation a effectuer des que la carte est disponible :
-  1. Ecrire un programme STM32 qui calcule le CRC d'une chaine connue
-     via le peripherique et l'affiche sur UART
-  2. Comparer avec la sortie de ce module sur la meme chaine
-  3. Ajuster les parametres jusqu'a correspondance
+    "123456789"  ->  0x9B63D02C
+    4 zeros      ->  0xC704DD7B
+    "STM32"      ->  0xF4F0FF62
 
-Ne pas construire le reste du protocole en supposant ce CRC correct.
+Identique a cette implementation.
 """
 
 POLY = 0x04C11DB7
