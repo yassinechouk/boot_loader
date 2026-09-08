@@ -1,0 +1,450 @@
+# STM32 Dual-Slot OTA Bootloader
+
+A bare-metal firmware update system for the STM32L476RG, written from scratch
+without HAL, CubeMX or any vendor abstraction layer.
+
+The board receives a new firmware over UART, verifies it at three independent
+levels, installs it into a spare flash slot, and boots it on trial. If the new
+image fails to confirm that it started correctly, the bootloader rolls back to
+the previous one — automatically, and without host intervention.
+
+```
+========================================
+  BOOTLOADER v0.1.0
+========================================
+Slot actif  : A
+Etat        : TESTING
+Taille      : 4288 octets
+Version     : 0x00020000
+Echecs boot : 3
+Repli       : slot B, VALID, 4272 octets
+Seuil d'echecs atteint, rollback
+Retour au slot B
+Saut vers 0x08080000
+```
+
+---
+
+## Why this project
+
+Development boards are flashed over SWD. Production hardware usually is not:
+the debug connector is omitted to save cost and board space, and read-out
+protection is enabled so the firmware cannot be extracted or replaced by
+whoever holds the device.
+
+What remains is the interface the product already uses to do its job — a serial
+link, a CAN bus, a network connection. A bootloader is what turns that
+interface into an update path.
+
+Building one from scratch also forces contact with parts of the architecture
+that application development hides completely: linker scripts, the vector
+table, runtime flash programming, and designing for interrupted operations.
+
+---
+
+## What it does
+
+- Receives firmware over UART using a custom binary protocol
+- Verifies transmission (per-frame CRC32), storage (read-back after write) and
+  consistency (whole-image CRC recomputed from flash)
+- Maintains two application slots, so a failed update never takes the device
+  down
+- Persists its state across power loss in duplicated, CRC-protected flash pages
+- Boots a new image on trial and rolls back if the application does not confirm
+- Survives power loss at any point in the transfer
+
+Everything is written directly against the hardware registers. No HAL, no
+CubeMX, no RTOS.
+
+---
+
+## Hardware
+
+| Item | Notes |
+|---|---|
+| NUCLEO-L476RG | Cortex-M4F, 1 MB flash (2 × 512 KB banks), 128 KB RAM |
+| Mini-USB cable | Powers the board, carries SWD and the virtual COM port |
+
+Nothing else. UART reaches the host through the on-board ST-LINK, so no wiring
+is required.
+
+---
+
+## Memory layout
+
+```
+0x08000000  ┌──────────────────┐
+            │    BOOTLOADER    │   32 KB   (8.7 KB used)
+0x08008000  ├──────────────────┤
+            │      SLOT A      │  480 KB
+0x08080000  ├──────────────────┤
+            │      SLOT B      │  480 KB
+0x080FF000  ├──────────────────┤
+            │   METADATA A     │    2 KB
+0x080FF800  ├──────────────────┤
+            │   METADATA B     │    2 KB
+0x08100000  └──────────────────┘
+```
+
+---
+
+## Getting started
+
+### Toolchain
+
+```bash
+sudo apt install gcc-arm-none-eabi gdb-multiarch openocd
+pip install pyserial --break-system-packages
+```
+
+### Build and flash the bootloader
+
+```bash
+cd bootloader
+make
+make flash
+```
+
+### Build the application
+
+```bash
+cd app
+make            # produces app_slotA.bin and app_slotB.bin
+make verify     # confirms each is linked to its own address
+```
+
+### Update over UART
+
+Press the reset button, then within two seconds:
+
+```bash
+cd app
+python3 ../tools/flash.py --port /dev/ttyACM0 --dir . --version 1.0.0
+```
+
+```
+Etat de la carte
+  protocole      : v1
+  bootloader     : v0.1.0
+  slot actif     : A
+  slot libre     : B
+  etat           : VALID
+  fichier        : app_slotB.bin
+
+Transfert
+  taille   : 4272 octets
+  CRC32    : 0xE85569D7
+  blocs    : 17 x 256
+  [########################################] 100%  4272/4272 octets
+  transmis en 0.6 s (6593 o/s)
+
+Verification
+  OK    CRC global verifie
+  OK    image marquee TESTING
+```
+
+To inspect the board without transferring anything:
+
+```bash
+python3 tools/flash.py --port /dev/ttyACM0 --info
+```
+
+---
+
+## Design decisions
+
+The reasoning behind each choice matters more than the choice itself. These are
+the ones that shaped the system.
+
+### Why two application slots
+
+A single-slot bootloader must erase the running firmware before writing the new
+one. Any interruption during that window — power loss, cable disconnect, a
+corrupted transfer — leaves the device with no bootable image and no way to
+recover except physical access.
+
+Two slots remove the window entirely. The incoming image is written to the
+inactive slot; the running one is never touched until the new image has proven
+itself.
+
+### Why two binaries per firmware version
+
+A compiled binary is bound to a link address. Function calls and global
+variable references are resolved at link time, so an image built for
+`0x08008000` will not run at `0x08080000`.
+
+Three ways around this were considered:
+
+| Approach | Verdict |
+|---|---|
+| Position-independent code (`-fPIC`) | Rejected. The vector table cannot be position-independent — it holds absolute addresses the hardware reads directly. Bare-metal PIC on ARM is poorly documented and full of edge cases. |
+| Copy to a fixed execution slot | Rejected. The copy is itself a destructive, non-atomic operation: a power loss mid-copy destroys the old image without completing the new one, recreating the exact problem dual-slot was meant to eliminate. |
+| Hardware bank swap (`BFB2`) | Rejected for this target. On STM32L4 the swap is performed by the ST ROM bootloader, which would bypass this bootloader entirely unless it were duplicated in both banks. |
+| **Two binaries** | **Chosen.** One flash write per byte, no scratch region, instant rollback. |
+
+The cost is two build artefacts instead of one — a build-system concern, moved
+to the host, where resources are abundant.
+
+### Why 256-byte data blocks
+
+Two hardware constraints intersect:
+
+- The flash programming unit is a 64-bit double word, so block size must be a
+  **multiple of 8**
+- The erase unit is a 2 KB page, so block size should be a **divisor of 2048**
+  to prevent blocks straddling page boundaries
+
+256 satisfies both. It also turned out to enable **lazy page erasure**: because
+page boundaries always coincide with block boundaries, the bootloader can erase
+each page immediately before writing it, testing only `offset % 2048 == 0`.
+
+Erasing the full 480 KB slot upfront would take about five seconds. Lazy
+erasure costs 3 page erases for a 1 KB image instead of 240.
+
+### Why a `TESTING` state
+
+A correct CRC proves an image's *integrity*, not its *correctness*. A firmware
+transmitted without a single corrupted bit can still crash immediately —
+because of a bug, a hardware mismatch, or simply because the wrong binary was
+sent to the wrong slot.
+
+So a freshly installed image is marked `TESTING`, not `VALID`. The bootloader
+increments a failure counter, then jumps to it. The application must write
+`VALID` itself once it has run long enough to be considered healthy. If it
+never does, the counter reaches its threshold and the bootloader falls back.
+
+The counter is incremented **before** the jump. Incrementing it afterwards
+would have no effect — the jump never returns.
+
+### Why duplicated metadata pages
+
+The metadata records which slot is active and in what state. It has to survive
+power loss, so it lives in flash — but updating flash requires erasing a page
+first, and a power loss during that erase would destroy the very information
+needed to recover.
+
+Two pages solve this. Only the inactive one is ever erased; the other stays
+readable throughout. Between two valid copies, the higher counter wins.
+
+Each copy carries a CRC over its own contents. The magic number alone is
+insufficient: it shares its 8-byte write unit with the counter, so an
+interruption after the first write would leave a valid magic in front of fields
+still at `0xFF`. `size` would read as 4 GB and the bootloader would run past
+the end of flash.
+
+### Fail-safe ordering
+
+The invalidation marker is always written **before** the destructive operation:
+
+```
+1. write state = IN_PROGRESS
+2. erase the target page
+3. write the blocks
+```
+
+The reverse order leaves a window where the metadata claims a valid firmware
+exists while it has just been erased — a state that *lies*. With the correct
+order, the worst case is a system that wrongly believes a transfer failed while
+the old image is intact: needless pessimism, not data loss.
+
+The same principle appears in journalling filesystems and database commit
+protocols.
+
+### Why interrupt-driven UART reception
+
+At 115200 baud a byte arrives every 87 µs. A flash page erase takes around
+20 ms — long enough to miss over two hundred bytes if the CPU were polling.
+
+The protocol is strictly request-response, so in principle the host never
+transmits while the board is writing. But that guarantee depends on the
+*sender's* discipline. A bootloader should not depend on its counterpart
+behaving correctly.
+
+Reception uses a lock-free single-producer, single-consumer ring buffer. The
+ISR writes `head` and reads `tail`; the main context writes `tail` and reads
+`head`. No variable is written by both, so no critical section is needed. One
+slot is sacrificed to distinguish full from empty — the alternative, an element
+counter, would be written by both contexts and would require disabling
+interrupts on every access.
+
+The hardware `ORE` flag is explicitly cleared. Left set, the USART **stops
+receiving entirely** — a failure mode that produces no visible symptom beyond
+frames going unanswered.
+
+---
+
+## A design flaw found by testing
+
+The nominal update path worked on the first attempt. The rollback path did not
+— and the way it failed is worth recording.
+
+The original metadata structure described only the *active* firmware: one
+`fw_size`, one `fw_crc32`, one `fw_version`. Rollback copied that structure,
+changed `active_slot`, and wrote it back.
+
+The result:
+
+```
+VTOR        : 0x08080000
+Verification de l'image :
+  CRC calcule : 0x74A4F8EC
+  CRC attendu : 0x980C80AA   DIVERGENT
+```
+
+The rollback itself succeeded — the board booted the fallback image. But the
+metadata now described the *rejected* image while pointing at the fallback
+slot. On the next reset the bootloader would read `VALID`, recompute the CRC
+against the wrong reference, find a mismatch, and refuse to boot.
+
+Rollback had saved the device once, then bricked it on the following restart.
+
+The fix was to describe each slot independently — a partition table rather than
+a description of the active image. Rollback then reduces to changing
+`active_slot`; both images keep their own size, CRC and version at all times.
+
+This flaw was invisible on the nominal path and would only have surfaced in the
+field, after the first genuine rollback.
+
+---
+
+## Testing
+
+### Host-side test suites
+
+The protocol, metadata manager and CRC are implemented in Python as well,
+allowing the full state machine to be exercised on a PC — including cases that
+are impractical to reproduce reliably on hardware, such as power loss after
+exactly one 8-byte write.
+
+```bash
+cd tools
+python3 test_protocol.py     # 47 tests: framing, sequencing, error paths
+python3 bootloader_sim.py    # full transfer against the simulator
+python3 debug_gui.py         # step-through visualisation with fault injection
+```
+
+| Suite | Tests | Covers |
+|---|---|---|
+| Protocol state machine | 47 | framing, resync, retransmission, timeouts, all error codes |
+| Metadata manager | 32 | dual-page selection, power loss during erase and write, counter ties |
+| Ring buffer | 22 | FIFO order, wraparound, saturation accounting |
+| Rollback scenario | 15 | two-image lifecycle across rollback and reinstall |
+
+### On-silicon verification
+
+| Module | Result |
+|---|---|
+| CRC32 | 3 vectors matching the Python implementation exactly |
+| Flash driver | 10 tests including all five rejection paths |
+| Metadata manager | 25 tests, persistence verified across bootloader reflash |
+| UART | sustained burst at 115200 baud, zero bytes lost, buffer reaching 511/511 |
+
+### Robustness scenarios
+
+Each was performed on hardware and produced the expected behaviour.
+
+**Rollback after repeated failure.** An application that never confirms is
+retried three times, then the bootloader switches back. The fallback image
+boots with a matching CRC on the following reset — the specific case that
+exposed the design flaw above.
+
+**Power loss mid-transfer.** The cable was pulled at 51 % of a 100 KB transfer.
+The active slot remained `VALID` and the board booted normally; the target slot
+was left `IN_PROGRESS` and correctly excluded from consideration.
+
+```
+Slot actif  : B
+Etat        : VALID
+Repli       : slot A, IN_PROGRESS, 102400 octets
+```
+
+**Wrong binary.** Sending the slot-B image while slot A is free is rejected
+before a single byte is transmitted, by the host tool and again by the
+bootloader's `ERR_SLOT`.
+
+**Corrupted frame.** A single flipped bit fails the frame CRC; the bootloader
+NACKs and the host retransmits. Reprocessing is harmless because frame handling
+is idempotent.
+
+---
+
+## Repository layout
+
+```
+├── bootloader/
+│   ├── main.c              boot decision, rollback, jump
+│   ├── startup.s           vector table, .data/.bss init
+│   ├── linker.ld           32 KB at 0x08000000
+│   └── src/
+│       ├── crc.c           hardware CRC peripheral driver
+│       ├── flash.c         erase, write with read-back, dual-bank
+│       ├── metadata_mgr.c  dual-page persistent state
+│       ├── protocol_mgr.c  frame assembly and command dispatch
+│       ├── uart.c          interrupt-driven RX, ring buffer
+│       └── systick.c       millisecond time base
+│
+├── app/
+│   ├── main.c              demo application with self-confirmation
+│   ├── linker_slotA.ld     0x08008000
+│   └── linker_slotB.ld     0x08080000
+│
+├── shared/                 headers used by both images
+│
+├── tools/
+│   ├── flash.py            update tool
+│   ├── transport.py        serial transport layer
+│   ├── protocol.py         frame encode/decode
+│   ├── crc32.py            CRC matching the STM32 peripheral
+│   ├── bootloader_sim.py   executable specification
+│   ├── test_protocol.py    host test suite
+│   └── debug_gui.py        protocol visualiser
+│
+└── PROTOCOL.md             full specification
+```
+
+---
+
+## Limitations
+
+**Integrity, not authenticity.** The CRC32 detects accidental corruption. It
+offers no protection against a deliberately crafted firmware, since an attacker
+can recompute it trivially. Hardening would mean replacing the whole-image CRC
+with an ECDSA signature verified against a public key in a write-protected
+region. The transport would be unchanged; only the final validation step would
+differ.
+
+**Fixed update window.** The bootloader listens for two seconds after reset. A
+production device would need a way to force update mode — a button held at
+boot, or an application command that reboots into the bootloader.
+
+**Dual binaries.** The host must hold two images per firmware version. Hardware
+with true bank remapping could use one.
+
+**No watchdog yet.** Rollback currently relies on the application crashing
+badly enough to reset the board. An independent watchdog would make the failure
+detection reliable rather than incidental.
+
+---
+
+## Planned work
+
+- Independent watchdog (IWDG) driving the failure path
+- FreeRTOS in the application layer
+- CAN as a second transport, exercising the protocol's transport independence
+- Firmware signature verification
+
+---
+
+## References
+
+- **RM0351** — STM32L4x5/L4x6 reference manual (flash, CRC, USART, boot)
+- **UM1724** — STM32 Nucleo-64 boards user manual (pinout, ST-LINK, solder
+  bridges)
+- **DS10198** — STM32L476xx datasheet (alternate function mapping)
+- **MCUboot** — reference implementation studied for comparison
+
+---
+
+## License
+
+MIT

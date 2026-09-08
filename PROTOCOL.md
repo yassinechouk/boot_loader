@@ -1,345 +1,466 @@
-# Protocole de mise à jour firmware — STM32L476RG
+# Firmware Update Protocol — STM32L476RG
 
-**Version du protocole : 1**
-**Cible : STM32L476RG (Nucleo-L476RG)**
-**Transport : UART 115200 8N1 (CAN prévu ultérieurement)**
-
----
-
-## 1. Vue d'ensemble
-
-Ce document spécifie le protocole binaire utilisé entre un outil PC et le bootloader
-embarqué pour transférer et installer un nouveau firmware.
-
-Le protocole est **indépendant de la couche de transport**. L'implémentation de
-référence utilise l'UART ; un portage sur CAN ou tout autre lien orienté octet ne
-nécessite aucune modification de la couche protocole.
-
-### Principes de conception
-
-- **Le PC est maître.** Il initie toutes les transactions ; le bootloader ne fait que répondre.
-- **Chaque trame est acquittée.** Le PC n'envoie la trame suivante qu'après un ACK.
-- **Rien n'est détruit avant validation.** Le bootloader vérifie tout ce qu'il peut
-  (taille, slot, version) avant d'effacer la moindre page de flash.
-- **Idempotence.** Le retraitement d'une trame déjà reçue ne produit aucun effet de bord.
-- **Défense en profondeur.** Trois niveaux de vérification indépendants : CRC par trame
-  (transmission), read-back après écriture (stockage), CRC global (cohérence de l'image).
+**Protocol version: 1**
+**Target: STM32L476RG (Nucleo-L476RG)**
+**Transport: UART 115200 8N1 (CAN planned)**
 
 ---
 
-## 2. Format de trame
+## 1. Overview
 
-Toutes les trames, dans les deux sens, partagent la même structure.
+This document specifies the binary protocol used between a host tool and the
+embedded bootloader to transfer and install a new firmware image.
+
+The protocol is **transport-agnostic**. The reference implementation runs over
+UART; porting it to CAN or any other byte-oriented link requires no change to
+the protocol layer itself.
+
+### Design principles
+
+- **The host is master.** It initiates every transaction; the bootloader only
+  responds.
+- **Every frame is acknowledged.** The host does not send the next frame until
+  the previous one is acknowledged.
+- **Nothing is destroyed before validation.** The bootloader checks everything
+  it can — size, target slot, version — before erasing a single page.
+- **Idempotence.** Reprocessing an already-received frame produces no side
+  effect.
+- **Defence in depth.** Three independent verification layers: per-frame CRC
+  (transmission), read-back after write (storage), whole-image CRC computed
+  from flash (consistency).
+
+---
+
+## 2. Frame format
+
+Every frame, in both directions, shares the same structure.
 
 ```
-Offset  Taille  Champ    Format          Description
-------  ------  -------  --------------  ------------------------------------
-0       2       MAGIC    0xAA 0x55       Préambule de synchronisation
-2       1       CMD      uint8           Type de message
-3       2       LENGTH   uint16 LE       Nombre d'octets dans DATA
-5       2       SEQ      uint16 LE       Numéro de séquence
-7       N       DATA     N octets        Payload (peut être vide)
-7+N     4       CRC32    uint32 LE       Contrôle d'intégrité
+Offset  Size  Field    Format
+------  ----  -------  ------------------------------------
+0       2     MAGIC    0xAA 0x55
+2       1     CMD      message type
+3       2     LENGTH   uint16, little-endian
+5       2     SEQ      uint16, little-endian
+7       N     DATA     payload, may be empty
+7+N     4     CRC32    uint32, little-endian
 ```
 
-**En-tête fixe : 7 octets. Surcoût total avec CRC : 11 octets par trame.**
+**Fixed header: 7 bytes. Total overhead including CRC: 11 bytes per frame.**
 
-### Ordre des octets
+### Byte order
 
-Tous les champs multi-octets sont en **little-endian**, l'ordre natif du Cortex-M4.
-Ce choix élimine toute conversion côté embarqué ; la conversion éventuelle est
-reportée sur le PC, qui dispose des ressources pour l'absorber.
+All multi-byte fields are **little-endian**, the native order of the Cortex-M4.
+This eliminates any conversion on the embedded side; the host absorbs the
+difference, having the resources to do so.
 
-### Champ MAGIC
+Network protocols traditionally chose big-endian for interoperability between
+heterogeneous machines. That constraint does not apply here — both endpoints
+are under our control.
 
-Valeur fixe `0xAA 0x55`. Les deux octets sont l'inverse binaire l'un de l'autre, ce qui
-produit huit transitions consécutives sur la ligne — le motif le plus éloigné possible
-d'une ligne bloquée à un niveau constant, donc le plus facile à distinguer du bruit.
+### MAGIC field
 
-Les valeurs `0x00` et `0xFF` sont volontairement évitées : elles abondent naturellement
-dans un binaire (padding, flash effacée, zones de zéros).
+Fixed value `0xAA 0x55`. The two bytes are the binary inverse of each other,
+producing eight consecutive transitions on the line — the pattern furthest
+removed from a line stuck at a constant level, and therefore the easiest to
+distinguish from noise or a failed transmitter.
 
-### Couverture du CRC
+`0x00` and `0xFF` are deliberately avoided: both occur abundantly in a compiled
+binary as padding, erased flash, and zero-filled regions.
 
-Le CRC32 est calculé sur **CMD, LENGTH, SEQ et DATA** — le MAGIC en est exclu.
+### CRC coverage
 
-Justification : le MAGIC se valide lui-même. Une trame dont le préambule est corrompu
-n'est jamais reconnue comme trame, donc son CRC n'est jamais évalué. L'inclure
-n'apporterait aucune détection supplémentaire.
+The CRC32 covers **CMD, LENGTH, SEQ and DATA** — the MAGIC is excluded.
 
-En revanche, la couverture de LENGTH est **critique** : un champ de longueur non protégé
-constitue un vecteur classique de dépassement de buffer.
+Rationale: the magic validates itself. A frame whose preamble is corrupted is
+never recognised as a frame, so its CRC is never evaluated. Including it would
+add no detection capability.
 
-### Polynôme CRC
+Covering LENGTH, on the other hand, is **critical**. An unprotected length
+field is a classic buffer-overflow vector.
 
-CRC-32 standard (polynôme `0x04C11DB7`), calculé par le périphérique CRC matériel du
-STM32L4. Valeur initiale `0xFFFFFFFF`.
+### CRC parameters
 
-### Taille de trame
+CRC-32 with the standard Ethernet polynomial `0x04C11DB7`, computed by the
+STM32L4 hardware CRC peripheral. Initial value `0xFFFFFFFF`, `REV_IN = 01`
+(byte-wise bit reversal), `REV_OUT = 0`, no final XOR.
 
-`LENGTH` maximal accepté : **1024 octets**.
-Taille nominale des blocs de données : **256 octets**.
+This configuration differs from `zlib.crc32`, which applies output reflection
+and a final XOR. The host implementation matches the hardware rather than the
+reverse: the peripheral computes in four AHB cycles with zero CPU cost, while
+the host can absorb any algorithm without it being noticeable.
 
-La taille de bloc est contrainte par deux propriétés du contrôleur flash du STM32L4 :
+Verified against silicon:
 
-- **Multiple de 8** — l'unité de programmation est le double-mot de 64 bits. Une taille
-  non multiple de 8 laisserait des octets orphelins à recoller entre deux trames.
-- **Diviseur de 2048** — l'unité d'effacement est la page de 2 Ko. Une taille non
-  diviseur ferait chevaucher certaines trames sur deux pages.
+| Input         | CRC32        |
+|---------------|--------------|
+| `"123456789"` | `0x9B63D02C` |
+| four zeros    | `0xC704DD7B` |
+| `"STM32"`     | `0xF4F0FF62` |
 
-256 satisfait les deux et offre un surcoût protocole de 4,3 %, avec un buffer RAM
-négligeable.
+### Frame size
 
----
+Maximum accepted `LENGTH`: **1024 bytes**.
+Nominal data block size: **256 bytes**.
 
-## 3. Codes de commande
+The block size is constrained by two properties of the STM32L4 flash
+controller:
 
-Le bit de poids fort distingue les requêtes des réponses, ce qui permet d'identifier
-l'émetteur d'un octet à l'œil nu dans une capture d'analyseur logique.
+- **Multiple of 8** — the programming unit is a 64-bit double word. A size that
+  is not a multiple of 8 would leave orphan bytes to be carried over between
+  frames.
+- **Divisor of 2048** — the erase unit is a 2 KB page. A non-divisor would make
+  some blocks straddle two pages.
 
-### Requêtes (PC → bootloader)
-
-| Valeur | Nom                | Description                                   |
-|--------|--------------------|-----------------------------------------------|
-| `0x01` | `CMD_GET_INFO`     | Interroge l'état de la carte                   |
-| `0x02` | `CMD_START_UPDATE` | Annonce un transfert : taille, CRC, slot cible |
-| `0x03` | `CMD_DATA`         | Transporte un bloc de firmware                 |
-| `0x04` | `CMD_END_UPDATE`   | Signale la fin, demande la validation globale  |
-| `0x05` | `CMD_ABORT`        | Annule le transfert en cours                   |
-
-### Réponses (bootloader → PC)
-
-| Valeur | Nom         | Description                        |
-|--------|-------------|------------------------------------|
-| `0x81` | `RSP_INFO`  | Réponse à `CMD_GET_INFO`           |
-| `0x82` | `RSP_ACK`   | Trame acceptée                     |
-| `0x83` | `RSP_NACK`  | Trame rejetée, avec code d'erreur  |
+256 satisfies both and yields 4.3 % protocol overhead with a negligible RAM
+buffer. This choice also makes lazy page erasure trivial to implement: page
+boundaries always coincide with block boundaries.
 
 ---
 
-## 4. Codes d'erreur
+## 3. Command codes
 
-Transportés dans le champ DATA d'un `RSP_NACK`, sur 1 octet.
+The most significant bit distinguishes requests from responses, which makes the
+originator of any byte identifiable at a glance in a logic-analyser capture.
 
-| Valeur | Nom               | Signification                                  |
-|--------|-------------------|------------------------------------------------|
-| `0x01` | `ERR_CRC`         | CRC de trame invalide                          |
-| `0x02` | `ERR_SEQ`         | Numéro de séquence inattendu                   |
-| `0x03` | `ERR_LENGTH`      | LENGTH hors des bornes acceptées               |
-| `0x04` | `ERR_FLASH`       | Échec d'écriture ou de relecture               |
-| `0x05` | `ERR_SIZE`        | Firmware trop volumineux pour le slot          |
-| `0x06` | `ERR_SLOT`        | Slot cible différent du slot annoncé           |
-| `0x07` | `ERR_STATE`       | Commande reçue dans un état incompatible       |
-| `0x08` | `ERR_GLOBAL_CRC`  | CRC du firmware complet invalide               |
-| `0x09` | `ERR_PROTO_VER`   | Version de protocole non supportée             |
+### Requests (host → bootloader)
 
-Un NACK sans code d'erreur ne dirait que « ça a échoué ». Le code transforme un
-message inutile en diagnostic exploitable, pour le coût d'un octet.
+| Value  | Name               | Description                                    |
+|--------|--------------------|------------------------------------------------|
+| `0x01` | `CMD_GET_INFO`     | Query board state                              |
+| `0x02` | `CMD_START_UPDATE` | Announce a transfer: size, CRC, target slot    |
+| `0x03` | `CMD_DATA`         | Carry a firmware block                         |
+| `0x04` | `CMD_END_UPDATE`   | Signal completion, request whole-image check   |
+| `0x05` | `CMD_ABORT`        | Cancel the transfer in progress                |
+
+### Responses (bootloader → host)
+
+| Value  | Name        | Description                       |
+|--------|-------------|-----------------------------------|
+| `0x81` | `RSP_INFO`  | Reply to `CMD_GET_INFO`           |
+| `0x82` | `RSP_ACK`   | Frame accepted                    |
+| `0x83` | `RSP_NACK`  | Frame rejected, with error code   |
+
+---
+
+## 4. Error codes
+
+Carried in the DATA field of an `RSP_NACK`, one byte.
+
+| Value  | Name              | Meaning                                    |
+|--------|-------------------|--------------------------------------------|
+| `0x01` | `ERR_CRC`         | Frame CRC mismatch                         |
+| `0x02` | `ERR_SEQ`         | Unexpected sequence number                 |
+| `0x03` | `ERR_LENGTH`      | LENGTH outside accepted bounds             |
+| `0x04` | `ERR_FLASH`       | Erase, write or read-back failure          |
+| `0x05` | `ERR_SIZE`        | Firmware too large for the slot            |
+| `0x06` | `ERR_SLOT`        | Target slot differs from the announced one |
+| `0x07` | `ERR_STATE`       | Command received in an incompatible state  |
+| `0x08` | `ERR_GLOBAL_CRC`  | Whole-image CRC mismatch                   |
+| `0x09` | `ERR_PROTO_VER`   | Unsupported protocol version               |
+
+A bare NACK would only say "it failed". The error code turns a useless message
+into an actionable diagnostic, at the cost of one byte.
 
 ---
 
 ## 5. Payloads
 
-### 5.1 `CMD_GET_INFO` — requête
+### 5.1 `CMD_GET_INFO` — request
 
-DATA vide, `LENGTH = 0`.
+Empty DATA, `LENGTH = 0`.
 
-### 5.2 `RSP_INFO` — réponse (12 octets)
-
-```
-Offset  Taille  Champ           Description
-------  ------  --------------  ------------------------------------------
-0       1       proto_version   Version de protocole supportée
-1       1       active_slot     Slot en cours d'exécution (0 = A, 1 = B)
-2       1       free_slot       Slot où le PC doit écrire (0 = A, 1 = B)
-3       1       state           État courant (voir §7)
-4       4       fw_version      Version du firmware actif (LE)
-8       4       bl_version      Version du bootloader (LE)
-```
-
-`active_slot` et `free_slot` sont mutuellement déductibles. Cette redondance est
-délibérée : elle place la décision « où écrire » du côté qui détient l'état réel,
-plutôt que de la laisser inférer par le PC. Moins le PC déduit, moins il peut se tromper.
-
-### 5.3 `CMD_START_UPDATE` — payload (16 octets)
+### 5.2 `RSP_INFO` — response (12 bytes)
 
 ```
-Offset  Taille  Champ           Description
-------  ------  --------------  ------------------------------------------
-0       4       fw_size         Taille du firmware en octets (LE)
-4       4       fw_crc32        CRC32 du firmware complet (LE)
-8       4       fw_version      Version du firmware transmis (LE)
-12      1       target_slot     Slot de destination (0 = A, 1 = B)
-13      1       proto_version   Version du protocole utilisée
-14      2       reserved        Réservé, mis à zéro
+Offset  Size  Field           Description
+------  ----  --------------  ------------------------------------------
+0       4     fw_version      Version of the active firmware (LE)
+4       4     bl_version      Bootloader version (LE)
+8       1     proto_version   Supported protocol version
+9       1     active_slot     Currently running slot (0 = A, 1 = B)
+10      1     free_slot       Slot the host must write to (0 = A, 1 = B)
+11      1     state           Current state of the active slot
 ```
 
-Le nombre de trames n'est **pas** transmis : il se déduit de `fw_size` et de la taille
-de bloc. Transmettre une valeur redondante ouvrirait la possibilité d'une incohérence
-entre deux champs, qu'il faudrait alors détecter et arbitrer.
+`active_slot` and `free_slot` are mutually deducible. The redundancy is
+deliberate: it places the "where to write" decision on the side that holds the
+real state, rather than leaving the host to infer it. The less the host infers,
+the less it can get wrong.
 
-Le champ `reserved` porte la structure à 16 octets et laisse de la place pour une
-extension future sans changement de taille, donc sans rupture de compatibilité.
+### 5.3 `CMD_START_UPDATE` — payload (16 bytes)
+
+```
+Offset  Size  Field           Description
+------  ----  --------------  ------------------------------------------
+0       4     fw_size         Firmware size in bytes (LE)
+4       4     fw_crc32        CRC32 of the whole image (LE)
+8       4     fw_version      Version of the transferred firmware (LE)
+12      1     target_slot     Destination slot (0 = A, 1 = B)
+13      1     proto_version   Protocol version in use
+14      2     reserved        Reserved, set to zero
+```
+
+The frame count is **not** transmitted: it follows from `fw_size` and the block
+size. Sending a redundant value would open the possibility of an inconsistency
+between two fields that would then have to be detected and arbitrated.
+
+The `reserved` field brings the structure to 16 bytes and leaves room for a
+future field without a size change, hence without breaking compatibility.
 
 ### 5.4 `CMD_DATA` — payload
 
-Bloc brut de firmware, `LENGTH` octets, à écrire à l'offset `SEQ × 256` depuis le
-début du slot cible.
+Raw firmware block, `LENGTH` bytes, written at offset `SEQ × 256` from the
+start of the target slot. `LENGTH` must be a non-zero multiple of 8, since the
+flash controller only programs double words.
 
 ### 5.5 `CMD_END_UPDATE` — payload
 
-DATA vide. Le bootloader relit l'intégralité de la zone écrite, recalcule le CRC32 et
-le compare à `fw_crc32` reçu dans `CMD_START_UPDATE`.
+Empty DATA. The bootloader re-reads the entire written region from flash,
+recomputes the CRC32 and compares it against the `fw_crc32` received in
+`CMD_START_UPDATE`.
 
 ### 5.6 `RSP_ACK` — payload
 
-DATA vide. Le champ SEQ reprend le numéro de la trame acquittée.
+Empty DATA. The SEQ field echoes the acknowledged frame number.
 
 ---
 
-## 6. Séquencement
+## 6. Sequencing
 
-### Numérotation
+### Numbering
 
-`SEQ` démarre à 0 pour `CMD_START_UPDATE` et s'incrémente à chaque trame.
-Le bootloader mémorise le dernier `SEQ` accepté.
+`SEQ` starts at 0 for `CMD_START_UPDATE` and increments with every frame. The
+bootloader remembers the last accepted `SEQ`.
 
-### Traitement à la réception
+### Handling on reception
 
-| Condition             | Action                                            |
-|-----------------------|---------------------------------------------------|
-| `SEQ == attendu`      | Traiter, écrire, acquitter                        |
-| `SEQ == attendu - 1`  | **Ne rien réécrire**, renvoyer l'ACK              |
-| Autre                 | `RSP_NACK` avec `ERR_SEQ`, abandon du transfert   |
+| Condition            | Action                                          |
+|----------------------|-------------------------------------------------|
+| `SEQ == expected`    | Process, write, acknowledge                     |
+| `SEQ == last`        | **Do not rewrite**, resend the acknowledgement  |
+| Otherwise            | `RSP_NACK` with `ERR_SEQ`, abort the transfer   |
 
-Le second cas correspond à une retransmission consécutive à la perte d'un ACK. Le PC
-n'attend pas que la trame soit réécrite — il attend l'accusé qu'il n'a jamais reçu.
+The second case corresponds to a retransmission following a lost ACK. The host
+is not asking for the frame to be rewritten — it is waiting for the
+acknowledgement it never received.
 
-Réécrire serait par ailleurs incorrect : la flash ne peut être reprogrammée sans
-effacement préalable, et une seconde écriture au même endroit produirait un résultat
-indéterminé.
+Rewriting would in fact be incorrect: flash cannot be reprogrammed without a
+prior erase, and a second write to the same location yields an undefined
+result.
 
-Cette propriété d'**idempotence** rend les retransmissions inoffensives.
+This **idempotence** property is what makes retransmission harmless.
 
-### Validation de plausibilité
+### Plausibility check
 
-À la lecture de `LENGTH`, avant toute bufferisation :
+On reading `LENGTH`, before any buffering:
 
 ```
-si LENGTH > 1024  →  rejeter immédiatement, retourner en recherche de MAGIC
+if LENGTH > 1024  ->  reject immediately, return to magic hunting
 ```
 
-Attendre le CRC pour rejeter obligerait à bufferiser une quantité de données
-potentiellement ingérable. Chaque champ est validé contre les contraintes connues
-dès sa lecture.
+Waiting for the CRC before rejecting would require buffering a potentially
+unmanageable amount of data. Every field is validated against known constraints
+as soon as it is read.
 
 ### Timeouts
 
-Le bootloader arme un timer à chaque trame **entièrement traitée**, et non à la
-réception d'un octet quelconque. Le compteur ne court donc pas pendant les opérations
-d'écriture flash, qui peuvent durer plusieurs dizaines de millisecondes.
+The bootloader restarts its inactivity timer after a frame has been **fully
+processed**, not on the arrival of an individual byte. The counter therefore
+does not run during flash operations, which may take tens of milliseconds.
 
-| Phase                     | Timeout |
-|---------------------------|---------|
-| Attente de `CMD_START`    | 2 s     |
-| Entre deux `CMD_DATA`     | 5 s     |
-| Côté PC, attente d'un ACK | 1 s     |
+| Phase                       | Timeout |
+|-----------------------------|---------|
+| Waiting for `CMD_START`     | 2 s     |
+| Between `CMD_DATA` frames   | 5 s     |
+| Host waiting for an ACK     | 1 s     |
 
-Le PC retransmet jusqu'à 3 fois avant d'abandonner.
-
----
-
-## 7. États et métadonnées
-
-### États du firmware
-
-| Valeur | État          | Signification                                        |
-|--------|---------------|------------------------------------------------------|
-| `0x00` | `EMPTY`       | Slot vide ou jamais programmé                        |
-| `0x01` | `IN_PROGRESS` | Transfert commencé, non terminé                      |
-| `0x02` | `TESTING`     | Image installée, en attente de confirmation applicative |
-| `0x03` | `VALID`       | Image validée, bootable sans réserve                 |
-
-### Ordonnancement fail-safe
-
-L'ordre des écritures est contraint par une règle : **le marqueur d'invalidation est
-toujours écrit avant l'opération destructive**, jamais après.
-
-Au démarrage d'un transfert :
-
-1. Écrire `state = IN_PROGRESS` dans les métadonnées
-2. Effacer le slot cible
-3. Écrire les blocs
-
-L'ordre inverse laisserait une fenêtre pendant laquelle les métadonnées affirmeraient
-qu'un firmware valide existe alors qu'il vient d'être effacé — un état *menteur*.
-Avec l'ordre correct, le pire cas est un système qui croit à tort qu'un transfert a
-échoué, alors que l'ancienne image est intacte : du pessimisme inutile, mais pas de
-perte de données.
-
-À la fin d'un transfert :
-
-1. Vérifier le CRC global par relecture
-2. Écrire `state = TESTING`, `active_slot = cible`
-3. Redémarrer
-
-### Mécanisme de test et rollback
-
-Un CRC valide prouve l'**intégrité** de l'image, pas son **bon fonctionnement**. Un
-firmware transmis sans la moindre corruption peut planter dès sa première seconde.
-
-L'état `TESTING` répond à ce cas :
-
-- Le bootloader saute vers l'image en `TESTING`
-- Si l'application démarre correctement, **elle écrit elle-même** `state = VALID`
-- Si elle plante, le watchdog provoque un reset ; le bootloader constate `TESTING`
-  sans confirmation, incrémente un compteur d'échecs et bascule sur le slot précédent
-
-L'application porte donc une responsabilité : confirmer son propre bon fonctionnement.
-Sans cette confirmation, le rollback ne peut pas fonctionner.
+The host retransmits up to three times before giving up.
 
 ---
 
-## 8. Séquence nominale
+## 7. Persistent metadata
 
-```
-PC                                    Bootloader
-│                                              │
-│──── CMD_GET_INFO (SEQ=0) ───────────────────▶│
-│◀─── RSP_INFO {free_slot=B, fw_ver=1.0} ──────│
-│                                              │
-│──── CMD_START_UPDATE (SEQ=0) ───────────────▶│  vérifie taille, slot, version
-│     {size, crc32, ver, slot=B}               │  écrit IN_PROGRESS
-│◀─── RSP_ACK (SEQ=0) ─────────────────────────│  efface le slot B
-│                                              │
-│──── CMD_DATA (SEQ=1) [256 o] ───────────────▶│  écrit + relit
-│◀─── RSP_ACK (SEQ=1) ─────────────────────────│
-│                                              │
-│──── CMD_DATA (SEQ=2) [256 o] ───────────────▶│
-│◀─── RSP_ACK (SEQ=2) ─────────────────────────│
-│              ...                             │
-│──── CMD_DATA (SEQ=N) ───────────────────────▶│
-│◀─── RSP_ACK (SEQ=N) ─────────────────────────│
-│                                              │
-│──── CMD_END_UPDATE (SEQ=N+1) ───────────────▶│  relit tout, vérifie CRC global
-│◀─── RSP_ACK (SEQ=N+1) ───────────────────────│  écrit TESTING, reset
-│                                              │
+### Firmware states
+
+| Value  | State         | Meaning                                            |
+|--------|---------------|----------------------------------------------------|
+| `0x00` | `EMPTY`       | Slot empty or never programmed                     |
+| `0x01` | `IN_PROGRESS` | Transfer started, not completed                    |
+| `0x02` | `TESTING`     | Image installed, awaiting application confirmation |
+| `0x03` | `VALID`       | Image validated, bootable without reservation      |
+
+### Structure — partition table
+
+```c
+typedef struct {
+    uint32_t size;              /* image size, 0 if absent */
+    uint32_t crc32;             /* expected CRC32          */
+    uint32_t version;           /* firmware version        */
+    uint8_t  state;             /* fw_state_t              */
+    uint8_t  reserved[3];
+} slot_info_t;                  /* 16 bytes */
+
+typedef struct {
+    uint32_t    magic;          /* 0x424C4D44 = "BLMD"     */
+    uint32_t    counter;        /* incremented per write   */
+    slot_info_t slot[2];        /* A and B, independent    */
+    uint8_t     active_slot;
+    uint8_t     boot_fail_count;
+    uint8_t     reserved[2];
+    uint32_t    meta_crc32;     /* CRC32 of preceding 44 B */
+} metadata_t;                   /* 48 bytes */
 ```
 
+**Each slot carries its own size, CRC and version.** An earlier revision
+described only the active firmware. The flaw surfaced only on rollback: when
+switching to the other slot, the metadata retained the size and CRC of the
+*rejected* image. The bootloader then read `VALID`, recomputed the fallback
+slot's CRC against a wrong reference, found a mismatch and refused to boot —
+on a board that carried a perfectly functional firmware.
+
+Rollback had saved the device once, then bricked it on the next reset.
+Describing both slots independently removes the problem: switching now amounts
+to changing `active_slot` alone.
+
+**Field distribution.** `size`, `crc32`, `version` and `state` are **per slot**:
+each image carries its own at all times, including the inactive one.
+`active_slot`, `boot_fail_count` and `counter` are **global** — the failure
+counter in particular can only ever describe one slot, since only one can be in
+`TESTING` at a time. This property would no longer hold with more than two
+slots, or if several images could be evaluated concurrently.
+
+### Dual-page mechanism
+
+The structure is written to two distinct flash pages. On each update, **only
+the inactive page is erased** and rewritten; the other stays intact and
+readable throughout the operation.
+
+Consequence: a power loss can never destroy both copies. On restart at least
+one valid copy remains — the pre-update one if the interruption occurred during
+the write.
+
+A copy is accepted if its magic matches **and** its CRC is correct. The magic
+alone would not suffice: it shares its 8-byte write unit with the counter, so
+an interruption after the first write would leave a valid magic in front of
+fields still at `0xFF`. `size` would then read `0xFFFFFFFF` — 4 GB — and the
+bootloader would run past the end of flash while verifying the image.
+
+Between two valid copies, the one with the higher counter prevails.
+
+**Counter tie.** This can only result from corruption or a bug. The module then
+deterministically selects page 0 rather than declaring the board blank.
+Refusing to boot would be the wrong trade-off: two valid copies carry two
+intact data sets, most likely describing the same state. There is no danger in
+booting, whereas falling back to update mode would immobilise a working device.
+One refuses to operate only when continuing would be dangerous. The anomaly
+resolves itself: the next write carries a strictly higher counter.
+
+The 32-bit counter overflow is ignored. Flash endurance — roughly 10 000 erase
+cycles per page — is the effective limit, five orders of magnitude lower.
+
 ---
 
-## 9. Machine à états du bootloader
+## 8. Fail-safe ordering
+
+The order of writes follows one rule: **the invalidation marker is always
+written before the destructive operation, never after.**
+
+Starting a transfer:
+
+1. Write `state = IN_PROGRESS` to metadata
+2. Erase the target page
+3. Write the blocks
+
+The reverse order would leave a window during which the metadata claims a valid
+firmware exists while it has just been erased — a *lying* state. With the
+correct order, the worst case is a system that wrongly believes a transfer
+failed while the previous image is intact: needless pessimism, but no data
+loss.
+
+Completing a transfer:
+
+1. Verify the whole-image CRC by reading back from flash
+2. Write `state = TESTING`, `active_slot = target`
+3. Reset
+
+### Lazy erasure
+
+The target slot is **not** erased upfront. Each page is erased immediately
+before being written.
+
+Erasing 480 KB in advance means 240 pages at roughly 20 ms each — close to five
+seconds of unresponsiveness, for a firmware that may occupy only 20 KB.
+Measured on the host test harness: 3 page erases for a 1 KB image, 4 for 4 KB,
+against 240 for a bulk erase.
+
+This is only possible because 256 divides 2048: no block ever straddles two
+pages, so the boundary test reduces to `offset % 2048 == 0`.
+
+---
+
+## 9. Test and rollback
+
+A correct CRC proves an image's **integrity**, not its **correctness**. A
+firmware transmitted without a single corrupted bit can still crash within its
+first second.
+
+`TESTING` addresses this:
+
+- The bootloader increments the failure counter, then jumps to the image
+- If the application starts correctly, **it writes `VALID` itself** and clears
+  the counter
+- If it crashes, the watchdog resets the board; the bootloader finds `TESTING`
+  unconfirmed and, beyond the threshold, switches back to the previous slot
+
+The counter is incremented **before** the jump. Incrementing it afterwards
+would have no effect, since the jump never returns.
+
+Before switching, the bootloader verifies that the fallback slot holds a valid
+image. Rejecting the current one only to find nothing behind it would be worse
+than continuing to try.
+
+The application therefore carries a responsibility. Without its confirmation,
+no rollback is possible — but without it, no firmware survives past three
+boots either.
+
+---
+
+## 10. Nominal sequence
+
+```
+Host                                          Bootloader
+│                                                      │
+│──── CMD_GET_INFO (SEQ=0) ───────────────────────────▶│
+│◀─── RSP_INFO {free_slot=B, fw_ver=1.0} ──────────────│
+│                                                      │
+│──── CMD_START_UPDATE (SEQ=0) ───────────────────────▶│ check size, slot
+│     {size, crc32, ver, slot=B}                       │ write IN_PROGRESS
+│◀─── RSP_ACK (SEQ=0) ─────────────────────────────────│
+│                                                      │
+│──── CMD_DATA (SEQ=1) [256 B] ───────────────────────▶│ erase page if needed
+│◀─── RSP_ACK (SEQ=1) ─────────────────────────────────│ write + read-back
+│                                                      │
+│──── CMD_DATA (SEQ=2) [256 B] ───────────────────────▶│
+│◀─── RSP_ACK (SEQ=2) ─────────────────────────────────│
+│              ...                                     │
+│──── CMD_DATA (SEQ=N) ───────────────────────────────▶│
+│◀─── RSP_ACK (SEQ=N) ─────────────────────────────────│
+│                                                      │
+│──── CMD_END_UPDATE (SEQ=N+1) ───────────────────────▶│ read back, check CRC
+│◀─── RSP_ACK (SEQ=N+1) ───────────────────────────────│ write TESTING, reset
+│                                                      │
+```
+
+---
+
+## 11. Bootloader state machine
 
 ```
         ┌──────────┐
         │   IDLE   │◀──────────────────────┐
         └────┬─────┘                       │
-             │ CMD_START_UPDATE valide     │
-             ▼                             │
-      ┌─────────────┐                      │
-      │  ERASING    │                      │
-      └──────┬──────┘                      │
-             │ effacement terminé          │
+             │ valid CMD_START_UPDATE      │
              ▼                             │
       ┌─────────────┐   CMD_DATA           │
       │  RECEIVING  │◀────────┐            │
@@ -351,37 +472,50 @@ PC                                    Bootloader
       └──────┬──────┘                      │
              │                             │
      ┌───────┴────────┐                    │
-     │ CRC OK         │ CRC KO             │
+     │ CRC OK         │ CRC bad            │
      ▼                ▼                    │
 ┌──────────┐   ┌──────────────┐            │
-│  TESTING │   │ NACK + ABORT │────────────┘
-│  + reset │   └──────────────┘
+│ COMPLETE │   │ NACK + ABORT │────────────┘
+│ + reset  │   └──────────────┘
 └──────────┘
 ```
 
-Un `CMD_ABORT` ou un timeout depuis n'importe quel état ramène à `IDLE` et remet les
-métadonnées sur l'ancien slot valide.
+`CMD_ABORT` or a timeout from any state returns to `IDLE`.
 
 ---
 
-## 10. Limites connues
+## 12. Known limitations
 
-Ce protocole assure l'**intégrité**, pas l'**authenticité**. Un CRC32 détecte la
-corruption accidentelle ; il n'offre aucune protection contre un firmware
-délibérément malveillant, un CRC étant trivialement recalculable par un attaquant.
+This protocol guarantees **integrity**, not **authenticity**. A CRC32 detects
+accidental corruption; it offers no protection against a deliberately malicious
+firmware, since an attacker can trivially recompute it.
 
-Une version durcie remplacerait le CRC global par une signature asymétrique (ECDSA
-P-256, par exemple), la clé publique étant stockée dans une zone flash protégée en
-écriture. Le mécanisme de transport resterait identique ; seule l'étape de validation
-finale changerait.
+A hardened version would replace the whole-image CRC with an asymmetric
+signature — ECDSA P-256, for instance — with the public key held in a
+write-protected flash region. The transport mechanism would be unchanged; only
+the final validation step would differ.
 
-Cette limite est assumée dans le cadre de ce projet, dont l'objet est la maîtrise du
-mécanisme de mise à jour et non la sécurisation cryptographique.
+Further limitations of the current design:
+
+- The bootloader's listening window is two seconds after reset. A production
+  device would need a way to force update mode — a button held at boot, or an
+  application command that reboots into the bootloader.
+- The dual-binary approach requires the host to hold two images per firmware
+  version. A device with hardware bank remapping could use a single one.
+- The failure counter is global, which relies on only one slot being in
+  `TESTING` at a time.
+- On rollback, the rejected slot keeps its `size` and `crc32` while its state
+  becomes `EMPTY`. Harmless, since `state` is authoritative, but clearing them
+  would be tidier.
+
+These are accepted within the scope of this project, whose object is mastery of
+the update mechanism rather than cryptographic hardening.
 
 ---
 
-## 11. Historique
+## 13. Revision history
 
-| Version | Modifications           |
-|---------|-------------------------|
-| 1       | Spécification initiale  |
+| Version | Changes                                                        |
+|---------|----------------------------------------------------------------|
+| 1.0     | Initial specification                                           |
+| 1.1     | Per-slot metadata (fixes rollback describing the wrong image)   |
