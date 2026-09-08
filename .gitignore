@@ -2,3 +2,13 @@
 *.bin
 *.map
 *.o
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Backups
+*.bak
+*.orig
+*~
