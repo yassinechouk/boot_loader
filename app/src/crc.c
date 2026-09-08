@@ -2,7 +2,7 @@
 #include "crc.h"
 
 /* ----------------------------------------------------------------
- * Adresses — RM0351 section 2.2.2
+ * Register addresses — RM0351 section 2.2.2
  * ---------------------------------------------------------------- */
 #define RCC_BASE            0x40021000UL
 #define CRC_BASE            0x40023000UL
@@ -11,10 +11,10 @@
 #define RCC_AHB1ENR         (*(volatile uint32_t *)(RCC_BASE + 0x48))
 #define RCC_AHB1ENR_CRCEN   (1U << 12)
 
-/* RM0351 section 15.4 : registres du peripherique CRC.
+/* RM0351 section 15.4 : CRC peripheral registers.
  *
- * CRC_DR est accessible par mot, demi-mot aligne a droite et octet
- * aligne a droite. On expose les deux largeurs utiles. */
+ * CRC_DR is accessible as a word, right-aligned half-word and
+ * right-aligned byte. Both useful widths are exposed here. */
 #define CRC_DR_WORD         (*(volatile uint32_t *)(CRC_BASE + 0x00))
 #define CRC_DR_BYTE         (*(volatile uint8_t  *)(CRC_BASE + 0x00))
 #define CRC_CR              (*(volatile uint32_t *)(CRC_BASE + 0x08))
@@ -22,7 +22,7 @@
 #define CRC_POL_REG         (*(volatile uint32_t *)(CRC_BASE + 0x14))
 
 /* CRC_CR — RM0351 section 15.4.3 */
-#define CRC_CR_RESET        (1U << 0)   /* rs : s'efface en materiel */
+#define CRC_CR_RESET        (1U << 0)   /* rs: cleared automatically in hardware */
 #define CRC_CR_REV_IN_BYTE  (1U << 5)   /* REV_IN[1:0] = 01 */
 
 #define CRC_POLYNOMIAL      0x04C11DB7UL
@@ -43,34 +43,33 @@ void crc32_init(void)
 
 void crc32_reset(void)
 {
-    /* Ecriture directe plutot que |=.
+    /* Direct write rather than |=.
      *
-     * RESET est un bit de type "rs" : il est mis par logiciel et
-     * efface automatiquement par le materiel. Un |= ferait une
-     * lecture-modification-ecriture dont le resultat dependrait de
-     * l'instant de la lecture. L'ecriture directe est deterministe.
+     * RESET is an "rs" bit: set by software and cleared automatically
+     * by hardware. A |= would perform a read-modify-write whose result
+     * depends on the moment of the read. A direct write is deterministic.
      *
-     * REV_IN doit etre reecrit explicitement, sans quoi il serait
-     * perdu et tous les CRC suivants seraient faux. */
+     * REV_IN must be rewritten explicitly; otherwise it would be lost
+     * and all subsequent CRCs would be wrong. */
     CRC_CR = CRC_CR_REV_IN_BYTE | CRC_CR_RESET;
 }
 
 
 void crc32_update(const uint8_t *data, uint32_t len)
 {
-    /* Alimentation octet par octet.
+    /* Byte-by-byte feeding.
      *
-     * Le peripherique consomme un cycle AHB par octet quelle que soit
-     * la largeur d'acces : 1 cycle pour un octet, 4 pour un mot. Le
-     * debit est donc identique, et l'ecriture par mots n'apporterait
-     * aucun gain — elle economiserait seulement des iterations de
-     * boucle, negligeables face au temps du peripherique.
+     * The peripheral consumes one AHB cycle per byte regardless of
+     * access width: 1 cycle for a byte, 4 for a word. Throughput is
+     * therefore identical, and word-wide writes would bring no gain —
+     * they would only save loop iterations, negligible compared to
+     * the peripheral's own time.
      *
-     * Elle imposerait en revanche de gerer l'alignement du pointeur
-     * source (un acces 32 bits non aligne est indefini sur Cortex-M)
-     * et les octets residuels d'une longueur non multiple de 4. Deux
-     * sources de bugs dans le module dont depend toute la validation
-     * du protocole. */
+     * Word writes would also require handling source pointer alignment
+     * (a 32-bit unaligned access is undefined on Cortex-M) and the
+     * residual bytes of a length that is not a multiple of 4. Two
+     * sources of bugs in the module on which all protocol validation
+     * depends. */
     while (len--) {
         CRC_DR_BYTE = *data++;
     }

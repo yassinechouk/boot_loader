@@ -2,7 +2,7 @@
 #include "uart.h"
 
 /* ----------------------------------------------------------------
- * Adresses — RM0351 section 2.2.2
+ * Addresses — RM0351 section 2.2.2
  * ---------------------------------------------------------------- */
 #define RCC_BASE            0x40021000UL
 #define GPIOA_BASE          0x48000000UL
@@ -40,31 +40,30 @@
 #define ISR_TC              (1U << 6)
 #define ISR_TXE             (1U << 7)
 
-/* USART_ICR — effacement des drapeaux, ecriture de 1 */
+/* USART_ICR — flag clear register, write 1 to clear */
 #define ICR_PECF            (1U << 0)
 #define ICR_FECF            (1U << 1)
 #define ICR_NECF            (1U << 2)
 #define ICR_ORECF           (1U << 3)
 
-/* Horloge systeme par defaut : MSI a 4 MHz au reset */
+/* Default system clock: MSI at 4 MHz after reset */
 #define SYSTEM_CLOCK_HZ     4000000UL
 
-/* USART2 occupe la position 38 dans la table des vecteurs.
-   NVIC_ISER1 couvre les interruptions 32 a 63, d'ou le decalage. */
+/* USART2 sits at position 38 in the vector table.
+   NVIC_ISER1 covers interrupts 32 to 63, hence the shift. */
 #define USART2_IRQ_NUMBER   38U
 
 
 /* ----------------------------------------------------------------
- * Tampon de reception
+ * Receive buffer
  *
- * head n'est ecrit que par l'ISR, tail que par le contexte
- * principal. Aucune variable n'est ecrite par les deux, ce qui rend
- * toute section critique inutile : sur Cortex-M, l'ecriture d'un
- * uint32_t aligne est atomique.
+ * head is written only by the ISR, tail only by the main context.
+ * No variable is written by both, so no critical section is needed:
+ * on Cortex-M, writing an aligned uint32_t is atomic.
  * ---------------------------------------------------------------- */
 static volatile uint8_t  rx_buffer[UART_RX_BUFFER_SIZE];
-static volatile uint32_t rx_head = 0;   /* ecrit par l'ISR          */
-static volatile uint32_t rx_tail = 0;   /* ecrit par le principal   */
+static volatile uint32_t rx_head = 0;   /* written by the ISR        */
+static volatile uint32_t rx_tail = 0;   /* written by main context   */
 
 static volatile uint32_t cnt_overrun_sw = 0;
 static volatile uint32_t cnt_overrun_hw = 0;
@@ -80,43 +79,43 @@ static volatile uint32_t cnt_noise      = 0;
 
 void uart_init(uint32_t baudrate)
 {
-    RCC_AHB2ENR  |= (1U << 0);      /* horloge GPIOA */
-    RCC_APB1ENR1 |= (1U << 17);     /* horloge USART2 */
+    RCC_AHB2ENR  |= (1U << 0);      /* GPIOA clock */
+    RCC_APB1ENR1 |= (1U << 17);     /* USART2 clock */
 
-    /* PA2 et PA3 en fonction alternative (MODER = 10) */
+    /* PA2 and PA3 in alternate function mode (MODER = 10) */
     GPIOA_MODER &= ~((3U << (2 * 2)) | (3U << (3 * 2)));
     GPIOA_MODER |=  ((2U << (2 * 2)) | (2U << (3 * 2)));
 
-    /* AF7 = USART2 (datasheet STM32L476, table de mapping des AF) */
+    /* AF7 = USART2 (STM32L476 datasheet, AF mapping table) */
     GPIOA_AFRL &= ~((0xFU << (2 * 4)) | (0xFU << (3 * 4)));
     GPIOA_AFRL |=  ((7U   << (2 * 4)) | (7U   << (3 * 4)));
 
-    /* Pull-up sur RX : maintient la ligne au repos si l'emetteur est
-       debranche, ce qui evite un flot d'octets parasites. */
+    /* Pull-up on RX: holds the line high when the transmitter is
+       disconnected, preventing a flood of spurious bytes. */
     GPIOA_PUPDR &= ~(3U << (3 * 2));
     GPIOA_PUPDR |=  (1U << (3 * 2));
 
-    /* Vitesse elevee : a 115200 bauds ce n'est pas critique, mais
-       cela reduit le temps de montee et donc la sensibilite au bruit. */
+    /* High speed: not critical at 115200 baud, but reduces rise
+       time and therefore noise sensitivity. */
     GPIOA_OSPEEDR |= (3U << (2 * 2)) | (3U << (3 * 2));
 
-    /* L'USART doit etre desactive pour reconfigurer BRR. */
+    /* USART must be disabled to reconfigure BRR. */
     USART2_CR1 = 0;
     USART2_CR3 = 0;
 
-    /* Mode oversampling par 16 (defaut) : BRR = f_ck / baudrate.
-       A 4 MHz et 115200 bauds, cela donne 34, soit 117647 bauds
-       reels — 2,1 % d'ecart, dans la tolerance de l'UART. */
+    /* Oversampling by 16 (default): BRR = f_ck / baudrate.
+       At 4 MHz and 115200 baud, this gives 34, yielding 117647 baud
+       actual — 2.1% error, within UART tolerance. */
     USART2_BRR = SYSTEM_CLOCK_HZ / baudrate;
 
     rx_head = 0;
     rx_tail = 0;
 
-    /* Effacer les drapeaux d'erreur eventuellement herites. */
+    /* Clear any error flags inherited from a previous session. */
     USART2_ICR = ICR_PECF | ICR_FECF | ICR_NECF | ICR_ORECF;
 
-    /* Activer l'interruption USART2 dans le NVIC avant d'armer
-       RXNEIE, pour ne pas manquer un octet arrivant aussitot. */
+    /* Enable the USART2 interrupt in the NVIC before arming RXNEIE,
+       to avoid missing a byte that arrives immediately. */
     NVIC_ISER1 = (1U << (USART2_IRQ_NUMBER - 32U));
 
     USART2_CR1 = CR1_TE | CR1_RE | CR1_RXNEIE | CR1_UE;
@@ -124,24 +123,23 @@ void uart_init(uint32_t baudrate)
 
 
 /* ----------------------------------------------------------------
- * Gestionnaire d'interruption
+ * Interrupt handler
  *
- * Le nom correspond a l'entree de la table des vecteurs dans
- * startup.s. Le symbole faible defini la-bas est remplace
- * automatiquement par cette definition forte.
+ * The name matches the vector table entry in startup.s. The weak
+ * symbol defined there is automatically replaced by this strong
+ * definition.
  * ---------------------------------------------------------------- */
 
 void USART2_IRQHandler(void)
 {
     uint32_t status = USART2_ISR_REG;
 
-    /* Les erreurs sont traitees en premier.
+    /* Errors are handled first.
      *
-     * ORE est le cas le plus grave : tant qu'il n'est pas efface
-     * explicitement, l'USART CESSE de recevoir. Un pilote qui
-     * l'ignore devient sourd apres le premier debordement, sans
-     * aucun symptome visible cote firmware — le PC voit simplement
-     * ses trames rester sans reponse. */
+     * ORE is the most severe: until it is explicitly cleared,
+     * the USART STOPS receiving. A driver that ignores it goes deaf
+     * after the first overrun, with no visible symptom on the
+     * firmware side — the PC simply sees its frames go unanswered. */
     if (status & (ISR_ORE | ISR_FE | ISR_NE | ISR_PE)) {
 
         if (status & ISR_ORE) {
@@ -149,11 +147,11 @@ void USART2_IRQHandler(void)
             USART2_ICR = ICR_ORECF;
         }
         if (status & ISR_FE) {
-            cnt_framing++;          /* bit de stop absent : debit errone */
+            cnt_framing++;          /* missing stop bit: wrong baud rate */
             USART2_ICR = ICR_FECF;
         }
         if (status & ISR_NE) {
-            cnt_noise++;            /* echantillonnage incoherent */
+            cnt_noise++;            /* inconsistent sampling */
             USART2_ICR = ICR_NECF;
         }
         if (status & ISR_PE) {
@@ -162,18 +160,18 @@ void USART2_IRQHandler(void)
     }
 
     if (status & ISR_RXNE) {
-        /* La lecture de RDR efface RXNE. Elle doit avoir lieu meme
-           si le tampon est plein, sans quoi l'interruption se
-           redeclencherait indefiniment. */
+        /* Reading RDR clears RXNE. It must happen even when the
+           buffer is full, otherwise the interrupt would re-fire
+           indefinitely. */
         uint8_t byte = (uint8_t)(USART2_RDR & 0xFFU);
 
         uint32_t next = (rx_head + 1U) & RX_MASK;
 
         if (next == rx_tail) {
-            /* Tampon plein : on jette le nouvel octet plutot que
-               d'ecraser le plus ancien. La trame en cours sera
-               invalidee par son CRC et retransmise ; ecraser
-               corromprait une trame deja complete. */
+            /* Buffer full: drop the new byte rather than overwriting
+               the oldest. The current frame will be invalidated by
+               its CRC and retransmitted; overwriting would corrupt a
+               frame that is already complete. */
             cnt_overrun_sw++;
         } else {
             rx_buffer[rx_head] = byte;
@@ -184,13 +182,13 @@ void USART2_IRQHandler(void)
 
 
 /* ----------------------------------------------------------------
- * Emission
+ * Transmission
  * ---------------------------------------------------------------- */
 
 void uart_putc(char c)
 {
     while (!(USART2_ISR_REG & ISR_TXE)) {
-        /* attente que le registre d'emission se libere */
+        /* wait for the transmit register to be free */
     }
     USART2_TDR = (uint32_t)(uint8_t)c;
 }
@@ -220,15 +218,15 @@ void uart_write(const uint8_t *data, uint32_t len)
 
 void uart_flush(void)
 {
-    /* TXE indique que le registre est libre, pas que l'octet est
-       parti. TC signale la fin reelle de la transmission. */
+    /* TXE indicates the register is free, not that the byte has
+       left. TC signals the actual end of transmission. */
     while (!(USART2_ISR_REG & ISR_TC)) {
     }
 }
 
 
 /* ----------------------------------------------------------------
- * Formatage
+ * Formatting
  * ---------------------------------------------------------------- */
 
 static const char HEX_DIGITS[] = "0123456789ABCDEF";
@@ -274,9 +272,9 @@ void uart_dec(uint32_t v)
 
 uint32_t uart_available(void)
 {
-    /* Lecture unique de chaque indice : head peut changer sous nos
-       pieds, mais la valeur lue reste coherente et sous-estime au
-       pire le nombre d'octets disponibles. */
+    /* Single read of each index: head may change under us, but the
+       value read remains consistent and at worst underestimates the
+       number of available bytes. */
     uint32_t head = rx_head;
     uint32_t tail = rx_tail;
 
@@ -293,7 +291,7 @@ int uart_getc(uint8_t *out)
     uint32_t tail = rx_tail;
 
     if (rx_head == tail) {
-        return 0;                   /* tampon vide */
+        return 0;                   /* buffer empty */
     }
 
     *out = rx_buffer[tail];
@@ -324,7 +322,7 @@ void uart_rx_flush(void)
 
 
 /* ----------------------------------------------------------------
- * Diagnostic
+ * Diagnostics
  * ---------------------------------------------------------------- */
 
 uint32_t uart_overrun_count(void)       { return cnt_overrun_sw; }

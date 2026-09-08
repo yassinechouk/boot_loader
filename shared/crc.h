@@ -4,66 +4,65 @@
 #include <stdint.h>
 
 /*
- * Pilote du peripherique CRC materiel du STM32L4.
+ * Hardware CRC peripheral driver for the STM32L4.
  *
- * Configuration retenue :
- *   POL      = 0x04C11DB7  (CRC-32 Ethernet, valeur de reset)
- *   INIT     = 0xFFFFFFFF  (valeur de reset)
- *   REV_IN   = 01          (inversion des bits par octet)
+ * Configuration used:
+ *   POL      = 0x04C11DB7  (CRC-32 Ethernet, reset value)
+ *   INIT     = 0xFFFFFFFF  (reset value)
+ *   REV_IN   = 01          (bit reversal per byte)
  *   REV_OUT  = 0
- *   XOR final: aucun
+ *   Final XOR: none
  *
- * REV_IN corrige l'ordre little-endian de la memoire : le peripherique
- * interprete un mot de 32 bits en big-endian interne, alors que le
- * Cortex-M range les octets en little-endian. L'inversion est faite en
- * materiel, sans cout logiciel.
+ * REV_IN corrects the little-endian memory order: the peripheral
+ * interprets a 32-bit word in big-endian internally, whereas the
+ * Cortex-M stores bytes in little-endian. The reversal is done in
+ * hardware, at no software cost.
  *
- * Cette configuration produit les memes valeurs que tools/crc32.py,
- * verifiees sur STM32L476RG :
+ * This configuration produces the same values as tools/crc32.py,
+ * verified on the STM32L476RG:
  *     "123456789"  ->  0x9B63D02C
  *     4 zeros      ->  0xC704DD7B
  *     "STM32"      ->  0xF4F0FF62
  *
- * NON REENTRANT
+ * NOT REENTRANT
  * -------------
- * Le peripherique CRC est une ressource partagee qui porte un etat
- * entre les appels. Un calcul lance depuis un contexte d'interruption
- * pendant qu'un autre est en cours en contexte principal corromprait
- * les deux resultats.
+ * The CRC peripheral is a shared stateful resource. A computation
+ * launched from an interrupt context while another is in progress
+ * in the main context would corrupt both results.
  *
- * Aucune protection n'est mise en place : dans ce bootloader, seul le
- * contexte principal calcule des CRC. La reception UART en interruption
- * se contente de remplir un tampon. Ajouter une section critique dans
- * crc32_update() augmenterait la latence d'interruption sur une boucle
- * appelee des centaines de fois par transfert, au risque de perdre des
- * octets — un vrai probleme cree pour s'en eviter un qui n'existe pas.
+ * No protection is implemented: in this bootloader, only the main
+ * context computes CRCs. The UART interrupt reception merely fills
+ * a buffer. Adding a critical section in crc32_update() would
+ * increase interrupt latency on a loop called hundreds of times
+ * per transfer, at the risk of dropping bytes — a real problem
+ * created to avoid one that does not exist.
  *
- * Si un appel depuis une interruption devenait necessaire, il faudrait
- * revoir cette decision explicitement.
+ * If a call from an interrupt ever became necessary, this decision
+ * would need to be revisited explicitly.
  */
 
-/* Active l'horloge du peripherique et applique la configuration.
-   A appeler une fois au demarrage, avant tout autre appel. */
+/* Enables the peripheral clock and applies the configuration.
+   Must be called once at startup, before any other call. */
 void crc32_init(void);
 
 /* ----------------------------------------------------------------
- * API incrementale
+ * Incremental API
  *
- * Permet d'alimenter le calcul par morceaux, sans jamais detenir
- * l'integralite des donnees en memoire.
+ * Allows feeding the computation in chunks, without ever holding
+ * the entire data in memory at once.
  * ---------------------------------------------------------------- */
 
-/* Recharge la valeur initiale. A appeler avant chaque nouveau calcul. */
+/* Reloads the initial value. Must be called before each new computation. */
 void crc32_reset(void);
 
-/* Ajoute len octets au calcul en cours. */
+/* Adds len bytes to the ongoing computation. */
 void crc32_update(const uint8_t *data, uint32_t len);
 
-/* Retourne le CRC accumule depuis le dernier crc32_reset(). */
+/* Returns the CRC accumulated since the last crc32_reset(). */
 uint32_t crc32_get(void);
 
 /* ----------------------------------------------------------------
- * Raccourci pour un calcul en une passe
+ * One-shot convenience wrapper
  * ---------------------------------------------------------------- */
 uint32_t crc32_compute(const uint8_t *data, uint32_t len);
 

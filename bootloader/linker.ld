@@ -1,4 +1,4 @@
-/* Point d'entrée du programme */
+/* Entry point */
 ENTRY(Reset_Handler)
 
 MEMORY
@@ -7,12 +7,12 @@ MEMORY
     RAM   (rwx) : ORIGIN = 0x20000000, LENGTH = 96K
 }
 
-/* Stack pointer initial : haut de la RAM, car le stack descend */
+/* Initial stack pointer: top of RAM, since the stack grows downward */
 _estack = ORIGIN(RAM) + LENGTH(RAM);
 
 SECTIONS
 {
-    /* Vector table, tout au début de la flash */
+    /* Vector table, at the very start of flash */
     .isr_vector :
     {
         . = ALIGN(4);
@@ -20,7 +20,7 @@ SECTIONS
         . = ALIGN(4);
     } >FLASH
 
-    /* Code exécutable */
+    /* Executable code */
     .text :
     {
         . = ALIGN(4);
@@ -30,7 +30,7 @@ SECTIONS
         _etext = .;
     } >FLASH
 
-    /* Constantes */
+    /* Constants */
     .rodata :
     {
         . = ALIGN(4);
@@ -39,8 +39,8 @@ SECTIONS
         . = ALIGN(4);
     } >FLASH
 
-    /* Variables globales initialisées :
-       adresses en RAM, contenu stocké en FLASH */
+    /* Initialised global variables:
+       addresses in RAM, initial values stored in FLASH */
     _sidata = LOADADDR(.data);
 
     .data :
@@ -53,7 +53,7 @@ SECTIONS
         _edata = .;
     } >RAM AT> FLASH
 
-    /* Variables globales non initialisées : mises à zéro au démarrage */
+    /* Uninitialised global variables: zeroed at startup */
     .bss :
     {
         . = ALIGN(4);

@@ -3,7 +3,7 @@
 #include "flash.h"
 #include "crc.h"
 
-/* Le CRC couvre tout sauf lui-meme : les 28 premiers octets. */
+/* The CRC covers everything except itself: the first 44 bytes. */
 #define META_CRC_COVERAGE   (sizeof(metadata_t) - sizeof(uint32_t))
 
 static const uint32_t meta_pages[2] = {
@@ -26,23 +26,23 @@ int metadata_is_valid(const metadata_t *meta)
         return 0;
     }
 
-    /* Le CRC tranche les cas que le magic ne peut pas detecter :
-       ecriture interrompue, cellule degradee, effacement partiel. */
-    uint32_t calcule = crc32_compute((const uint8_t *)meta,
+    /* The CRC handles cases the magic cannot detect:
+       interrupted write, degraded cell, partial erase. */
+    uint32_t computed = crc32_compute((const uint8_t *)meta,
                                      META_CRC_COVERAGE);
 
-    return (calcule == meta->meta_crc32);
+    return (computed == meta->meta_crc32);
 }
 
 
 /* ----------------------------------------------------------------
- * Lecture
+ * Read
  * ---------------------------------------------------------------- */
 
 /*
- * Charge une page et indique si elle est exploitable.
- * La copie est faite avant validation : lire depuis la flash puis
- * valider la copie evite de relire deux fois la meme zone.
+ * Loads a page and indicates whether it is usable.
+ * The copy is made before validation: reading from flash then
+ * validating the copy avoids reading the same region twice.
  */
 static int load_page(unsigned index, metadata_t *dest)
 {
@@ -71,20 +71,20 @@ int metadata_read(metadata_t *dest)
     int b_ok = load_page(1, &b);
 
     if (!a_ok && !b_ok) {
-        return 0;               /* carte vierge ou metadonnees detruites */
+        return 0;               /* blank board or destroyed metadata */
     }
 
-    const metadata_t *retenu;
+    const metadata_t *chosen;
 
     if (a_ok && b_ok) {
-        /* Comparaison stricte : a compteurs egaux, la page 0 gagne.
-           Voir la note sur le cas d'egalite dans metadata_mgr.h. */
-        retenu = (b.counter > a.counter) ? &b : &a;
+        /* Strict comparison: on equal counters, page 0 wins.
+           See the note on the equal-counter case in metadata_mgr.h. */
+        chosen = (b.counter > a.counter) ? &b : &a;
     } else {
-        retenu = a_ok ? &a : &b;
+        chosen = a_ok ? &a : &b;
     }
 
-    const uint8_t *s = (const uint8_t *)retenu;
+    const uint8_t *s = (const uint8_t *)chosen;
     uint8_t *d = (uint8_t *)dest;
     for (unsigned i = 0; i < sizeof(metadata_t); i++) {
         d[i] = s[i];
@@ -95,15 +95,15 @@ int metadata_read(metadata_t *dest)
 
 
 /* ----------------------------------------------------------------
- * Ecriture
+ * Write
  * ---------------------------------------------------------------- */
 
 /*
- * Determine dans quelle page ecrire et quel compteur utiliser.
+ * Determines which page to write to and what counter to use.
  *
- * On cible systematiquement la page qui ne porte PAS la version
- * courante : elle peut etre effacee sans risque, puisque l'autre
- * reste lisible pendant toute l'operation.
+ * Always targets the page that does NOT hold the current version:
+ * it can be safely erased since the other remains readable
+ * throughout the operation.
  */
 static void select_target(unsigned *page, uint32_t *counter)
 {
@@ -121,10 +121,10 @@ static void select_target(unsigned *page, uint32_t *counter)
 
     if (a_ok && b_ok) {
         if (b.counter > a.counter) {
-            *page = 0;                  /* B est courante -> ecrire en A */
+            *page = 0;                  /* B is current -> write to A */
             *counter = b.counter + 1U;
         } else {
-            *page = 1;                  /* A est courante -> ecrire en B */
+            *page = 1;                  /* A is current -> write to B */
             *counter = a.counter + 1U;
         }
         return;
@@ -150,21 +150,21 @@ metadata_status_t metadata_write(const metadata_t *src)
     uint32_t counter;
     select_target(&page, &counter);
 
-    /* Construction integrale a partir de zero.
+    /* Full construction from zero.
      *
-     * L'initialisation a {0} garantit que reserved et tout eventuel
-     * remplissage valent zero, ce qui garde les dumps memoire
-     * lisibles et permettra de distinguer, le jour ou un octet
-     * reserve sera utilise, une valeur ecrite d'un residu.
+     * Zero-initialisation ensures that reserved bytes and any
+     * potential padding are zero, keeping memory dumps readable and
+     * making it possible to distinguish, when a reserved byte is
+     * eventually used, a written value from a residue.
      *
-     * magic, counter et meta_crc32 sont calcules ici et non repris
-     * de src : l'appelant ne doit pas pouvoir produire une structure
-     * au CRC faux ou au compteur incoherent.
+     * magic, counter and meta_crc32 are computed here, not copied
+     * from src: the caller must not be able to produce a structure
+     * with a wrong CRC or an inconsistent counter.
      *
-     * La mise a zero est ecrite en boucle explicite plutot qu'avec
-     * une initialisation { 0 }. Sur une structure de cette taille,
-     * GCC remplacerait cette derniere par un appel a memset(), qui
-     * n'existe pas en compilation -nostdlib. */
+     * The zeroing is written as an explicit loop rather than using
+     * a { 0 } initialiser. For a structure of this size, GCC would
+     * replace the latter with a call to memset(), which does not
+     * exist when compiling with -nostdlib. */
     metadata_t out;
     {
         uint8_t *raw = (uint8_t *)&out;
@@ -194,20 +194,20 @@ metadata_status_t metadata_write(const metadata_t *src)
         return META_ERR_ERASE;
     }
 
-    /* sizeof(metadata_t) vaut 32, multiple de l'unite d'ecriture. */
+    /* sizeof(metadata_t) is 48, a multiple of the write unit. */
     if (flash_write(addr, (const uint8_t *)&out,
                     sizeof(metadata_t)) != FLASH_OK) {
         return META_ERR_WRITE;
     }
 
-    /* Relecture complete : flash_write() a deja fait son read-back,
-       mais on verifie ici que la structure relue est reconnue valide
-       par les memes criteres que ceux du demarrage. */
-    metadata_t relu;
-    if (!load_page(page, &relu)) {
+    /* Full re-read: flash_write() already did its own read-back,
+       but here we verify that the re-read structure is recognised as
+       valid by the same criteria used at startup. */
+    metadata_t reread;
+    if (!load_page(page, &reread)) {
         return META_ERR_VERIFY;
     }
-    if (relu.counter != counter) {
+    if (reread.counter != counter) {
         return META_ERR_VERIFY;
     }
 
@@ -216,7 +216,7 @@ metadata_status_t metadata_write(const metadata_t *src)
 
 
 /* ----------------------------------------------------------------
- * Effacement complet
+ * Full erase
  * ---------------------------------------------------------------- */
 
 metadata_status_t metadata_erase_all(void)

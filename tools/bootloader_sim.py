@@ -1,17 +1,16 @@
 """
-Simulateur du bootloader STM32.
+STM32 bootloader simulator.
 
-Reproduit le comportement attendu du firmware sans aucun materiel :
-la flash est un bytearray, les pages de metadonnees aussi. Cela permet
-de tester la machine a etats, le sequencement, les retransmissions et
-surtout les coupures d'alimentation — impossibles a reproduire de
-maniere fiable sur du vrai materiel.
+Reproduces the expected firmware behaviour without any hardware:
+flash is a bytearray, metadata pages too. This allows testing the
+state machine, sequencing, retransmissions and especially power cuts
+— impossible to reproduce reliably on real hardware.
 
-La fidelite recherchee porte sur les proprietes qui causent des bugs :
-  - une page effacee vaut 0xFF partout
-  - on ne peut pas ecrire sans effacer au prealable
-  - l'ecriture se fait par blocs de 8 octets (double-mot)
-  - une coupure laisse un etat partiel observable
+The fidelity targeted covers the properties that cause bugs:
+  - an erased page is 0xFF throughout
+  - writing requires a prior erase
+  - writes are in 8-byte blocks (double-word)
+  - a power cut leaves a partial, observable state
 """
 
 import struct
@@ -21,14 +20,14 @@ import protocol as p
 from crc32 import crc32_stm32
 
 # ---------------------------------------------------------------
-# Constantes — miroir de shared/metadata.h
+# Constants — mirror of shared/metadata.h
 # ---------------------------------------------------------------
 FLASH_PAGE_SIZE = 2048
 SLOT_SIZE = 480 * 1024
 METADATA_MAGIC = 0x424C4D44          # "BLMD"
-METADATA_FORMAT = "<IIIIIBBBBI"      # 28 octets
+METADATA_FORMAT = "<IIIIIBBBBI"      # 28 bytes
 METADATA_SIZE = struct.calcsize(METADATA_FORMAT)
-WRITE_UNIT = 8                       # double-mot 64 bits
+WRITE_UNIT = 8                       # 64-bit double-word
 MAX_BOOT_FAILURES = 3
 BOOTLOADER_VERSION = 0x00000100
 
@@ -36,11 +35,11 @@ ERASED = 0xFF
 
 
 class PowerLoss(Exception):
-    """Levee pour simuler une coupure d'alimentation."""
+    """Raised to simulate a power cut."""
 
 
 # ---------------------------------------------------------------
-# Metadonnees
+# Metadata
 # ---------------------------------------------------------------
 @dataclass
 class Metadata:
@@ -53,7 +52,7 @@ class Metadata:
     boot_fail_count: int = 0
 
     def pack(self) -> bytes:
-        """Serialise, CRC compris."""
+        """Serialises, CRC included."""
         body = struct.pack(
             "<IIIII BBBB",
             METADATA_MAGIC,
@@ -71,24 +70,23 @@ class Metadata:
     @classmethod
     def unpack(cls, raw: bytes):
         """
-        Deserialise depuis une page. Retourne None si invalide.
+        Deserialises from a page. Returns None if invalid.
 
-        Le magic seul ne suffit pas : il partage son bloc de 8 octets
-        avec le compteur, donc une coupure apres la premiere ecriture
-        laisse un magic valide devant des champs encore a 0xFF.
-        Le CRC tranche.
+        The magic alone is not sufficient: it shares its 8-byte block
+        with the counter, so a power cut after the first write leaves
+        a valid magic in front of fields still at 0xFF. The CRC decides.
         """
         if len(raw) < METADATA_SIZE:
             return None
 
         body = raw[:METADATA_SIZE - 4]
-        crc_stocke = struct.unpack("<I", raw[METADATA_SIZE - 4:METADATA_SIZE])[0]
+        stored_crc = struct.unpack("<I", raw[METADATA_SIZE - 4:METADATA_SIZE])[0]
 
         magic = struct.unpack("<I", body[0:4])[0]
         if magic != METADATA_MAGIC:
             return None
 
-        if crc32_stm32(body) != crc_stocke:
+        if crc32_stm32(body) != stored_crc:
             return None
 
         (_, counter, fw_size, fw_crc, fw_ver,
@@ -114,14 +112,14 @@ class Metadata:
 
 
 # ---------------------------------------------------------------
-# Flash simulee
+# Simulated flash
 # ---------------------------------------------------------------
 class SimulatedFlash:
     """
-    Reproduit les contraintes du controleur flash du STM32L4.
+    Reproduces the constraints of the STM32L4 flash controller.
 
-    write_after_n_units permet de simuler une coupure : l'ecriture
-    s'interrompt apres N blocs de 8 octets, laissant le reste efface.
+    write_after_n_units allows simulating a power cut: the write
+    stops after N 8-byte blocks, leaving the rest erased.
     """
 
     def __init__(self):
@@ -135,22 +133,22 @@ class SimulatedFlash:
         ]
         self.erase_count = [0, 0]
 
-    # -- slots applicatifs ------------------------------------------
+    # -- application slots ------------------------------------------
     def erase_slot(self, slot: int):
         self.slots[slot] = bytearray([ERASED] * SLOT_SIZE)
 
     def write_slot(self, slot: int, offset: int, data: bytes) -> bool:
         """
-        Ecrit puis relit pour verifier (read-back).
-        Retourne False si la zone n'etait pas effacee, ce qui rendrait
-        le resultat indetermine sur du vrai materiel.
+        Writes then reads back to verify (read-back).
+        Returns False if the area was not erased, which would yield
+        an indeterminate result on real hardware.
         """
         if offset + len(data) > SLOT_SIZE:
             return False
 
         zone = self.slots[slot][offset:offset + len(data)]
         if any(b != ERASED for b in zone):
-            return False        # ecriture sur zone non effacee
+            return False        # write on non-erased area
 
         self.slots[slot][offset:offset + len(data)] = data
         return self.slots[slot][offset:offset + len(data)] == data
@@ -158,21 +156,21 @@ class SimulatedFlash:
     def read_slot(self, slot: int, offset: int, length: int) -> bytes:
         return bytes(self.slots[slot][offset:offset + length])
 
-    # -- pages de metadonnees ---------------------------------------
+    # -- metadata pages ---------------------------------------------
     def erase_meta_page(self, page: int, interrupt: bool = False):
         if interrupt:
-            # Effacement interrompu : etat intermediaire indetermine.
-            # On modelise le pire cas, une page a moitie effacee.
+            # Interrupted erase: indeterminate intermediate state.
+            # Model the worst case: a half-erased page.
             half = FLASH_PAGE_SIZE // 2
             self.meta_pages[page][:half] = bytearray([ERASED] * half)
-            raise PowerLoss(f"coupure pendant l'effacement de la page {page}")
+            raise PowerLoss(f"power cut during erase of page {page}")
         self.meta_pages[page] = bytearray([ERASED] * FLASH_PAGE_SIZE)
         self.erase_count[page] += 1
 
     def write_meta_page(self, page: int, data: bytes, stop_after_units=None):
         """
-        Ecrit par blocs de 8 octets. stop_after_units simule une coupure
-        apres N blocs, laissant le reste de la page a 0xFF.
+        Writes in 8-byte blocks. stop_after_units simulates a power cut
+        after N blocks, leaving the rest of the page at 0xFF.
         """
         padded = data + bytes([ERASED] * ((-len(data)) % WRITE_UNIT))
         units = len(padded) // WRITE_UNIT
@@ -180,7 +178,7 @@ class SimulatedFlash:
         for i in range(units):
             if stop_after_units is not None and i >= stop_after_units:
                 raise PowerLoss(
-                    f"coupure apres {i} blocs sur {units} (page {page})"
+                    f"power cut after {i} blocks out of {units} (page {page})"
                 )
             start = i * WRITE_UNIT
             self.meta_pages[page][start:start + WRITE_UNIT] = \
@@ -191,12 +189,12 @@ class SimulatedFlash:
 
 
 # ---------------------------------------------------------------
-# Bootloader simule
+# Simulated bootloader
 # ---------------------------------------------------------------
 class BootloaderSim:
-    """Machine a etats du bootloader, sans materiel."""
+    """Bootloader state machine, without hardware."""
 
-    # etats internes
+    # internal states
     IDLE = "IDLE"
     RECEIVING = "RECEIVING"
 
@@ -205,7 +203,7 @@ class BootloaderSim:
         self.verbose = verbose
         self.state = self.IDLE
 
-        # contexte de transfert
+        # transfer context
         self.expected_seq = 0
         self.last_seq = None
         self.target_slot = None
@@ -214,56 +212,56 @@ class BootloaderSim:
         self.fw_version = 0
         self.bytes_received = 0
 
-    # -- journalisation ---------------------------------------------
+    # -- logging ----------------------------------------------------
     def _log(self, msg: str):
         if self.verbose:
             print(f"  [sim] {msg}")
 
-    # -- metadonnees ------------------------------------------------
+    # -- metadata ---------------------------------------------------
     def read_metadata(self):
         """
-        Lit les deux pages et retourne la plus recente valide.
-        Retourne None si aucune ne l'est (carte vierge).
+        Reads both pages and returns the most recent valid one.
+        Returns None if none is valid (blank board).
         """
-        candidats = []
+        candidates = []
         for page in (0, 1):
             meta = Metadata.unpack(self.flash.read_meta_page(page))
             if meta is not None:
-                candidats.append((meta.counter, page, meta))
+                candidates.append((meta.counter, page, meta))
 
-        if not candidats:
+        if not candidates:
             return None
 
-        candidats.sort(key=lambda t: t[0])
-        return candidats[-1][2]
+        candidates.sort(key=lambda t: t[0])
+        return candidates[-1][2]
 
     def write_metadata(self, meta: Metadata, stop_after_units=None,
                        interrupt_erase=False):
         """
-        Ecrit dans la page inactive uniquement : l'autre reste intacte
-        et lisible pendant toute l'operation.
+        Writes to the inactive page only: the other remains intact
+        and readable throughout the operation.
         """
-        courant = self.read_metadata()
-        if courant is None:
+        current = self.read_metadata()
+        if current is None:
             page = 0
             meta.counter = 1
         else:
-            # trouver quelle page porte la version courante
-            page_courante = 0
+            # find which page holds the current version
+            current_page = 0
             for pg in (0, 1):
                 m = Metadata.unpack(self.flash.read_meta_page(pg))
-                if m is not None and m.counter == courant.counter:
-                    page_courante = pg
+                if m is not None and m.counter == current.counter:
+                    current_page = pg
                     break
-            page = 1 - page_courante
-            meta.counter = courant.counter + 1
+            page = 1 - current_page
+            meta.counter = current.counter + 1
 
         self.flash.erase_meta_page(page, interrupt=interrupt_erase)
         self.flash.write_meta_page(page, meta.pack(),
                                    stop_after_units=stop_after_units)
-        self._log(f"metadonnees ecrites page {page}: {meta}")
+        self._log(f"metadata written to page {page}: {meta}")
 
-    # -- reponses ---------------------------------------------------
+    # -- responses --------------------------------------------------
     def _ack(self, seq: int) -> p.Frame:
         return p.Frame(cmd=p.RSP_ACK, seq=seq)
 
@@ -271,9 +269,9 @@ class BootloaderSim:
         self._log(f"NACK {p.ERROR_NAMES.get(err, err)}")
         return p.Frame(cmd=p.RSP_NACK, seq=seq, data=bytes([err]))
 
-    # -- traitement des trames --------------------------------------
+    # -- frame handling ---------------------------------------------
     def handle(self, raw: bytes) -> bytes:
-        """Recoit des octets bruts, retourne la reponse en octets."""
+        """Receives raw bytes, returns the response as bytes."""
         try:
             frame = p.decode(raw)
         except p.BadCRC:
@@ -281,9 +279,9 @@ class BootloaderSim:
         except p.BadLength:
             return p.encode(self._nack(0, p.ERR_LENGTH))
         except (p.BadMagic, p.Incomplete):
-            return b""      # trame ignoree, pas de reponse
+            return b""      # frame ignored, no response
 
-        self._log(f"recu {frame}")
+        self._log(f"received {frame}")
 
         handlers = {
             p.CMD_GET_INFO: self._on_get_info,
@@ -324,29 +322,28 @@ class BootloaderSim:
 
         meta = self.read_metadata()
         active = meta.active_slot if meta else p.SLOT_A
-        libre = 1 - active
+        free = 1 - active
 
-        # Toutes les verifications AVANT d'effacer quoi que ce soit.
+        # All checks BEFORE erasing anything.
         if su.fw_size > SLOT_SIZE:
             return self._nack(frame.seq, p.ERR_SIZE)
-        if su.target_slot != libre:
+        if su.target_slot != free:
             return self._nack(frame.seq, p.ERR_SLOT)
 
-        # Fail-safe ordering : marquer IN_PROGRESS avant d'effacer.
-        # L'ordre inverse laisserait une fenetre ou les metadonnees
-        # affirment qu'un firmware valide existe alors qu'il vient
-        # d'etre detruit.
-        nouvelle = Metadata(
+        # Fail-safe ordering: mark IN_PROGRESS before erasing.
+        # The reverse order would leave a window where metadata claims
+        # a valid firmware exists while it has just been destroyed.
+        updated = Metadata(
             fw_size=su.fw_size,
             fw_crc32=su.fw_crc32,
             fw_version=su.fw_version,
             active_slot=active,
             state=p.STATE_IN_PROGRESS,
         )
-        self.write_metadata(nouvelle)
+        self.write_metadata(updated)
 
         self.flash.erase_slot(su.target_slot)
-        self._log(f"slot {'AB'[su.target_slot]} efface")
+        self._log(f"slot {'AB'[su.target_slot]} erased")
 
         self.target_slot = su.target_slot
         self.fw_size = su.fw_size
@@ -363,18 +360,18 @@ class BootloaderSim:
         if self.state != self.RECEIVING:
             return self._nack(frame.seq, p.ERR_STATE)
 
-        # Retransmission : le PC n'a pas recu l'ACK precedent.
-        # Il n'attend pas une reecriture, seulement l'accuse manquant.
-        # Reecrire serait d'ailleurs incorrect : la flash ne se
-        # reprogramme pas sans effacement.
+        # Retransmission: the PC did not receive the previous ACK.
+        # It does not expect a re-write, only the missing acknowledgement.
+        # Re-writing would be incorrect: flash cannot be reprogrammed
+        # without erasing.
         if frame.seq == self.last_seq:
-            self._log("retransmission detectee, ACK renvoye sans reecriture")
+            self._log("retransmission detected, ACK resent without re-write")
             return self._ack(frame.seq)
 
         if frame.seq != self.expected_seq:
             return self._nack(frame.seq, p.ERR_SEQ)
 
-        index = frame.seq - 1        # START_UPDATE occupait seq 0
+        index = frame.seq - 1        # START_UPDATE occupied seq 0
         offset = index * p.DATA_BLOCK_SIZE
 
         if not self.flash.write_slot(self.target_slot, offset, frame.data):
@@ -390,19 +387,18 @@ class BootloaderSim:
         if self.state != self.RECEIVING:
             return self._nack(frame.seq, p.ERR_STATE)
 
-        # Verification globale par relecture de la flash : elle
-        # valide le stockage, la ou le CRC de trame ne validait
-        # que la transmission.
-        contenu = self.flash.read_slot(self.target_slot, 0, self.fw_size)
-        calcule = crc32_stm32(contenu)
+        # Global verification by re-reading flash: validates storage,
+        # where the per-frame CRC only validated delivery.
+        content = self.flash.read_slot(self.target_slot, 0, self.fw_size)
+        computed = crc32_stm32(content)
 
-        if calcule != self.fw_crc32:
-            self._log(f"CRC global KO : 0x{calcule:08X} != 0x{self.fw_crc32:08X}")
+        if computed != self.fw_crc32:
+            self._log(f"global CRC mismatch: 0x{computed:08X} != 0x{self.fw_crc32:08X}")
             self.state = self.IDLE
             return self._nack(frame.seq, p.ERR_GLOBAL_CRC)
 
-        # TESTING, pas VALID : un CRC correct prouve l'integrite,
-        # pas le bon fonctionnement. L'application devra confirmer.
+        # TESTING, not VALID: a correct CRC proves integrity,
+        # not correct operation. The application must confirm.
         meta = Metadata(
             fw_size=self.fw_size,
             fw_crc32=self.fw_crc32,
@@ -412,58 +408,58 @@ class BootloaderSim:
         )
         self.write_metadata(meta)
         self.state = self.IDLE
-        self._log("CRC global OK, passage en TESTING")
+        self._log("global CRC OK, transitioning to TESTING")
 
         return self._ack(frame.seq)
 
     def _on_abort(self, frame: p.Frame) -> p.Frame:
         self.state = self.IDLE
-        self._log("transfert annule")
+        self._log("transfer aborted")
         return self._ack(frame.seq)
 
-    # -- simulation du demarrage ------------------------------------
+    # -- boot simulation --------------------------------------------
     def boot(self) -> str:
         """
-        Reproduit la decision prise au demarrage.
-        Retourne une description de l'action choisie.
+        Reproduces the boot decision.
+        Returns a description of the chosen action.
         """
         meta = self.read_metadata()
 
         if meta is None:
-            return "aucune metadonnee valide -> mode reception"
+            return "no valid metadata -> receive mode"
 
         if meta.state == p.STATE_VALID:
-            return f"saut vers le slot {'AB'[meta.active_slot]}"
+            return f"jump to slot {'AB'[meta.active_slot]}"
 
         if meta.state == p.STATE_TESTING:
             if meta.boot_fail_count >= MAX_BOOT_FAILURES:
-                autre = 1 - meta.active_slot
-                return f"rollback vers le slot {'AB'[autre]}"
+                other = 1 - meta.active_slot
+                return f"rollback to slot {'AB'[other]}"
             meta.boot_fail_count += 1
             self.write_metadata(meta)
             return (
-                f"saut d'essai vers le slot {'AB'[meta.active_slot]} "
-                f"(tentative {meta.boot_fail_count}/{MAX_BOOT_FAILURES})"
+                f"trial jump to slot {'AB'[meta.active_slot]} "
+                f"(attempt {meta.boot_fail_count}/{MAX_BOOT_FAILURES})"
             )
 
         if meta.state == p.STATE_IN_PROGRESS:
-            return "transfert interrompu detecte -> mode reception"
+            return "interrupted transfer detected -> receive mode"
 
-        return "slot vide -> mode reception"
+        return "empty slot -> receive mode"
 
 
 # ---------------------------------------------------------------
-# Demonstration
+# Demo
 # ---------------------------------------------------------------
 if __name__ == "__main__":
     import os
 
     sim = BootloaderSim(verbose=True)
-    print("Etat initial :", sim.boot())
+    print("Initial state:", sim.boot())
 
     firmware = os.urandom(1000)
     fw_crc = crc32_stm32(firmware)
-    print(f"\nFirmware de {len(firmware)} octets, CRC 0x{fw_crc:08X}")
+    print(f"\nFirmware: {len(firmware)} bytes, CRC 0x{fw_crc:08X}")
 
     # GET_INFO
     rep = p.decode(sim.handle(p.encode(p.Frame(p.CMD_GET_INFO, 0))))
@@ -473,17 +469,17 @@ if __name__ == "__main__":
     # START_UPDATE
     su = p.StartUpdate(len(firmware), fw_crc, 0x00010000, info.free_slot)
     rep = p.decode(sim.handle(p.encode(p.Frame(p.CMD_START_UPDATE, 0, su.pack()))))
-    print(f"reponse : {rep}")
+    print(f"response: {rep}")
 
     # DATA
     seq = 1
-    for bloc in p.split_firmware(firmware):
-        rep = p.decode(sim.handle(p.encode(p.Frame(p.CMD_DATA, seq, bloc))))
+    for block in p.split_firmware(firmware):
+        rep = p.decode(sim.handle(p.encode(p.Frame(p.CMD_DATA, seq, block))))
         assert rep.cmd == p.RSP_ACK, rep
         seq += 1
 
     # END_UPDATE
     rep = p.decode(sim.handle(p.encode(p.Frame(p.CMD_END_UPDATE, seq))))
-    print(f"fin : {rep}")
+    print(f"end: {rep}")
 
-    print("\nAu redemarrage :", sim.boot())
+    print("\nAt next boot:", sim.boot())

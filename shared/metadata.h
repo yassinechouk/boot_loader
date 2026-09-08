@@ -4,21 +4,21 @@
 #include <stdint.h>
 
 /* =========================================================
- * Plan memoire flash — STM32L476RG
+ * Flash memory layout — STM32L476RG
  *
- * 1 Mo de flash, organisee en deux banques de 512 Ko,
- * pages uniformes de 2 Ko.
+ * 1 MB of flash, organized in two 512 KB banks,
+ * uniform 2 KB pages.
  *
  *   0x08000000  +------------------+
- *               |   BOOTLOADER     |  32 Ko
+ *               |   BOOTLOADER     |  32 KB
  *   0x08008000  +------------------+
- *               |     SLOT A       |  480 Ko
+ *               |     SLOT A       |  480 KB
  *   0x08080000  +------------------+
- *               |     SLOT B       |  480 Ko
+ *               |     SLOT B       |  480 KB
  *   0x080FF000  +------------------+
- *               |  METADONNEES A   |  2 Ko
+ *               |  METADATA A      |  2 KB
  *   0x080FF800  +------------------+
- *               |  METADONNEES B   |  2 Ko
+ *               |  METADATA B      |  2 KB
  *   0x08100000  +------------------+
  * ========================================================= */
 #define FLASH_BASE_ADDR         0x08000000UL
@@ -36,7 +36,7 @@
 #define META_PAGE_B_ADDR        0x080FF800UL
 
 /* =========================================================
- * Identification des slots
+ * Slot identifiers
  * ========================================================= */
 #define SLOT_A                  0U
 #define SLOT_B                  1U
@@ -45,116 +45,113 @@
 #define OTHER_SLOT(s)           (((s) == SLOT_A) ? SLOT_B : SLOT_A)
 
 /* =========================================================
- * Etats du firmware
+ * Firmware states
  *
- * STATE_TESTING est l'etat intermediaire qui rend le rollback
- * possible : un CRC valide prouve l'integrite de l'image, pas
- * son bon fonctionnement. L'application doit confirmer
- * elle-meme son demarrage en passant a STATE_VALID.
+ * STATE_TESTING is the intermediate state that makes rollback
+ * possible: a valid CRC proves the integrity of the image, not
+ * that it works correctly. The application must confirm its own
+ * successful boot by transitioning to STATE_VALID.
  * ========================================================= */
 typedef enum {
-    STATE_EMPTY       = 0x00U,   /* slot vide ou jamais programme        */
-    STATE_IN_PROGRESS = 0x01U,   /* transfert commence, non termine      */
-    STATE_TESTING     = 0x02U,   /* installe, en attente de confirmation */
-    STATE_VALID       = 0x03U    /* valide, bootable sans reserve        */
+    STATE_EMPTY       = 0x00U,   /* slot empty or never programmed        */
+    STATE_IN_PROGRESS = 0x01U,   /* transfer started, not yet complete    */
+    STATE_TESTING     = 0x02U,   /* installed, awaiting confirmation      */
+    STATE_VALID       = 0x03U    /* valid, bootable without reservation   */
 } fw_state_t;
 
 /* =========================================================
- * Description d'un slot (16 octets, sans padding)
+ * Per-slot descriptor (16 bytes, no padding)
  *
- * Chaque emplacement porte SES PROPRES taille, CRC et version.
+ * Each slot carries ITS OWN size, CRC and version.
  *
- * Une premiere version de cette structure ne decrivait que le
- * firmware actif. Le defaut n'apparaissait qu'au rollback : en
- * basculant vers l'autre slot, les metadonnees conservaient la
- * taille et le CRC de l'image rejetee. Le bootloader lisait alors
- * VALID, recalculait le CRC du slot de repli contre une valeur
- * erronee, constatait la divergence et refusait de demarrer — sur
- * une carte pourtant porteuse d'un firmware fonctionnel.
+ * An earlier version of this structure described only the active
+ * firmware. The flaw only appeared at rollback: when switching
+ * to the other slot, the metadata retained the size and CRC of
+ * the rejected image. The bootloader would then read VALID,
+ * recompute the CRC of the fallback slot against the wrong value,
+ * observe a mismatch and refuse to boot — even though the board
+ * contained a working firmware.
  *
- * Le rollback avait sauve la carte une fois, puis l'immobilisait au
- * redemarrage suivant. Decrire les deux slots independamment
- * supprime le probleme : basculer ne consiste plus qu'a changer
- * active_slot.
+ * The rollback had saved the board once, then immobilised it on
+ * the next reboot. Describing both slots independently eliminates
+ * the problem: switching only requires changing active_slot.
  * ========================================================= */
 typedef struct {
-    uint32_t size;              /* taille de l'image, 0 si absente       */
-    uint32_t crc32;             /* CRC32 attendu de cette image          */
-    uint32_t version;           /* version du firmware                   */
+    uint32_t size;              /* image size, 0 if absent               */
+    uint32_t crc32;             /* expected CRC32 of this image          */
+    uint32_t version;           /* firmware version                      */
     uint8_t  state;             /* fw_state_t                            */
-    uint8_t  reserved[3];       /* extension future, toujours a zero     */
-} slot_info_t;                  /* 16 octets */
+    uint8_t  reserved[3];       /* future extension, always zero         */
+} slot_info_t;                  /* 16 bytes */
 
 /* =========================================================
- * Structure de metadonnees (48 octets, sans padding)
+ * Metadata structure (48 bytes, no padding)
  *
- * Ecrite en double exemplaire dans deux pages distinctes. A chaque
- * mise a jour, seule la page inactive est effacee : l'autre reste
- * intacte et lisible, ce qui garantit qu'une coupure d'alimentation
- * ne detruit jamais les deux copies.
+ * Written in duplicate across two distinct pages. On each update,
+ * only the inactive page is erased: the other remains intact and
+ * readable, ensuring that a power cut never destroys both copies.
  *
- * Une copie est valide si son magic correspond ET si son CRC est
- * correct. Le magic seul ne suffirait pas : il partage son bloc de
- * 8 octets avec le compteur, donc une coupure apres la premiere
- * ecriture laisserait un magic valide devant des champs encore a
- * 0xFF. size vaudrait alors 0xFFFFFFFF, soit 4 Go, et le bootloader
- * sortirait des limites de la flash en tentant de verifier l'image.
+ * A copy is valid if its magic matches AND its CRC is correct.
+ * The magic alone is not sufficient: it shares its 8-byte block
+ * with the counter, so a power cut after the first write would
+ * leave a valid magic in front of fields still at 0xFF. size
+ * would then be 0xFFFFFFFF (4 GB), and the bootloader would
+ * exceed flash bounds when trying to verify the image.
  *
- * Le CRC couvre les 44 octets precedents. Il detecte l'ecriture
- * incomplete comme la degradation d'une cellule au fil du temps.
+ * The CRC covers the preceding 44 bytes. It detects both
+ * incomplete writes and cell degradation over time.
  *
- * La copie faisant foi est celle dont le compteur est le plus eleve
- * parmi celles qui sont valides.
+ * The authoritative copy is the one with the highest counter
+ * among the valid copies.
  *
- * La taille de 48 octets est un multiple de 8, l'unite de
- * programmation du controleur flash. La structure est donc ecrite
- * telle quelle, sans ecart entre sizeof() et ce qui est en flash.
+ * The 48-byte size is a multiple of 8, the flash controller's
+ * programming unit. The structure is therefore written as-is,
+ * with no gap between sizeof() and what ends up in flash.
  *
- * Repartition des champs
- * ----------------------
- * size, crc32, version et state sont PAR SLOT : chaque image porte
- * les siens en permanence, y compris celle qui n'est pas active.
+ * Field layout
+ * ------------
+ * size, crc32, version and state are PER-SLOT: each image carries
+ * its own permanently, including the one that is not active.
  *
- * active_slot, boot_fail_count et counter sont GLOBAUX. Le compteur
- * d'echecs en particulier ne decrit jamais qu'un seul slot : un seul
- * peut etre en STATE_TESTING a la fois, puisque le bootloader ne
- * saute que vers active_slot. Le dupliquer par slot laisserait un
- * champ perpetuellement inutilise et suggererait une coexistence qui
- * ne se produit pas.
+ * active_slot, boot_fail_count and counter are GLOBAL. The failure
+ * counter in particular describes only one slot at a time: only
+ * one can be in STATE_TESTING at a time, since the bootloader only
+ * jumps to active_slot. Duplicating it per slot would leave a field
+ * permanently unused and imply a concurrency that never occurs.
  *
- * Cette derniere propriete cesserait de tenir avec plus de deux
- * slots, ou si plusieurs images pouvaient etre evaluees en
- * parallele. Le compteur devrait alors devenir per-slot.
+ * This last property would no longer hold with more than two slots,
+ * or if multiple images could be evaluated in parallel. The counter
+ * would then need to become per-slot.
  *
- * Le debordement du compteur 32 bits est ignore : l'endurance de la
- * flash, environ 10 000 cycles par page, constitue la limite
- * effective, cinq ordres de grandeur plus bas.
+ * 32-bit counter overflow is ignored: flash endurance, roughly
+ * 10,000 cycles per page, is the effective limit, five orders of
+ * magnitude lower.
  * ========================================================= */
 typedef struct {
-    uint32_t    magic;          /* METADATA_MAGIC si la copie est valide */
-    uint32_t    counter;        /* incremente a chaque ecriture          */
-    slot_info_t slot[2];        /* [SLOT_A] et [SLOT_B], independants    */
-    uint8_t     active_slot;    /* SLOT_A ou SLOT_B                      */
-    uint8_t     boot_fail_count;/* demarrages sans confirmation          */
-    uint8_t     reserved[2];    /* extension future, toujours a zero     */
-    uint32_t    meta_crc32;     /* CRC32 des 44 octets precedents        */
-} metadata_t;                   /* 48 octets */
+    uint32_t    magic;          /* METADATA_MAGIC if the copy is valid   */
+    uint32_t    counter;        /* incremented on each write             */
+    slot_info_t slot[2];        /* [SLOT_A] and [SLOT_B], independent    */
+    uint8_t     active_slot;    /* SLOT_A or SLOT_B                      */
+    uint8_t     boot_fail_count;/* boots without confirmation            */
+    uint8_t     reserved[2];    /* future extension, always zero         */
+    uint32_t    meta_crc32;     /* CRC32 of the preceding 44 bytes       */
+} metadata_t;                   /* 48 bytes */
 
 #define METADATA_MAGIC          0x424C4D44UL   /* "BLMD" */
 #define METADATA_SIZE           sizeof(metadata_t)
 
 /* =========================================================
- * Politique de rollback
+ * Rollback policy
  *
- * Au-dela de ce nombre de demarrages rates consecutifs sans
- * confirmation applicative, le bootloader bascule sur le slot
- * precedent.
+ * Beyond this number of consecutive failed boots without
+ * application confirmation, the bootloader switches to the
+ * previous slot.
  * ========================================================= */
 #define MAX_BOOT_FAILURES       3U
 
 /* =========================================================
- * Version du bootloader
- * Format : 0x00MMmmpp  (majeur, mineur, patch)
+ * Bootloader version
+ * Format: 0x00MMmmpp  (major, minor, patch)
  * ========================================================= */
 #define BOOTLOADER_VERSION      0x00000100UL   /* 0.1.0 */
 

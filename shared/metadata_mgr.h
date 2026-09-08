@@ -5,98 +5,97 @@
 #include "metadata.h"
 
 /*
- * Gestion des metadonnees persistantes du bootloader.
+ * Persistent metadata management for the bootloader.
  *
- * Mecanisme a double page
- * -----------------------
- * La structure est ecrite en deux exemplaires, dans deux pages flash
- * distinctes. A chaque mise a jour, seule la page inactive est
- * effacee puis reecrite : l'autre reste intacte et lisible pendant
- * toute l'operation.
+ * Dual-page mechanism
+ * -------------------
+ * The structure is written in duplicate across two distinct flash
+ * pages. On each update, only the inactive page is erased and
+ * rewritten: the other remains intact and readable throughout the
+ * operation.
  *
- * Consequence : une coupure d'alimentation ne peut jamais detruire
- * les deux copies simultanement. Au redemarrage, il reste toujours
- * au moins une copie valide — celle d'avant la mise a jour si la
- * coupure est survenue pendant l'ecriture.
+ * Consequence: a power cut can never destroy both copies
+ * simultaneously. On reboot, at least one valid copy always
+ * remains — the one from before the update if the cut occurred
+ * during the write.
  *
- * Une copie est retenue si son magic correspond ET si son CRC est
- * correct. Le magic seul ne suffirait pas : il partage son bloc de
- * 8 octets avec le compteur, donc une coupure apres la premiere
- * ecriture laisserait un magic valide devant des champs encore a
- * 0xFF. Le CRC couvrant les 28 premiers octets, toute alteration
- * partielle est rejetee.
+ * A copy is retained if its magic matches AND its CRC is correct.
+ * The magic alone is not sufficient: it shares its 8-byte block
+ * with the counter, so a power cut after the first write would
+ * leave a valid magic in front of fields still at 0xFF. The CRC
+ * covering the first 28 bytes rejects any partial alteration.
  *
- * Entre deux copies valides, celle dont le compteur est le plus
- * eleve fait foi.
+ * Between two valid copies, the one with the higher counter takes
+ * precedence.
  *
- * Cas d'egalite des compteurs
- * ---------------------------
- * Cette situation ne peut resulter que d'une corruption ou d'un bug.
- * Le module choisit alors la page 0, de facon deterministe, plutot
- * que de declarer la carte vierge.
+ * Equal counter case
+ * ------------------
+ * This situation can only result from corruption or a bug.
+ * The module then chooses page 0, deterministically, rather than
+ * declaring the board blank.
  *
- * Refuser de demarrer serait le mauvais choix : deux copies valides
- * portent deux jeux de donnees intacts, decrivant vraisemblablement
- * le meme etat. Il n'y a aucun danger a booter, alors que basculer
- * en mode reception immobiliserait un appareil qui fonctionnait.
- * On ne refuse de fonctionner que si continuer serait dangereux.
+ * Refusing to boot would be the wrong choice: two valid copies
+ * hold two intact datasets, most likely describing the same state.
+ * There is no danger in booting, whereas falling into receive mode
+ * would immobilise a device that was working. We only refuse to
+ * operate when continuing would be dangerous.
  *
- * L'anomalie se resout d'elle-meme : la prochaine ecriture porte un
- * compteur strictement superieur.
+ * The anomaly resolves itself: the next write carries a strictly
+ * higher counter.
  *
- * Copie plutot que pointeur
- * -------------------------
- * metadata_read() recopie les donnees en RAM au lieu de retourner un
- * pointeur vers la flash. Un tel pointeur deviendrait silencieusement
- * invalide des que metadata_write() effacerait la page visee : les
- * champs se mettraient a lire 0xFF sans aucun avertissement.
+ * Copy rather than pointer
+ * ------------------------
+ * metadata_read() copies data into RAM instead of returning a
+ * pointer into flash. Such a pointer would silently become invalid
+ * as soon as metadata_write() erased the target page: fields would
+ * start reading as 0xFF without any warning.
  *
- * Le cout est de 32 octets sur 96 Ko. Le benefice est que l'appelant
- * possede ses donnees et peut les modifier avant de les reecrire.
+ * The cost is 32 bytes out of 96 KB. The benefit is that the caller
+ * owns its data and can modify it before rewriting it.
  *
- * NON REENTRANT : s'appuie sur flash.c et crc.c, qui ne le sont pas.
+ * NOT REENTRANT: relies on flash.c and crc.c, which are not either.
  */
 
 typedef enum {
     META_OK = 0,
-    META_ERR_ERASE,       /* echec de l'effacement de la page inactive */
-    META_ERR_WRITE,       /* echec de la programmation                 */
-    META_ERR_VERIFY,      /* relecture incoherente apres ecriture      */
-    META_ERR_ARG          /* argument nul                              */
+    META_ERR_ERASE,       /* failed to erase the inactive page         */
+    META_ERR_WRITE,       /* programming failure                        */
+    META_ERR_VERIFY,      /* inconsistent read-back after write         */
+    META_ERR_ARG          /* null argument                              */
 } metadata_status_t;
 
 /*
- * Lit la copie la plus recente et la recopie dans dest.
+ * Reads the most recent copy and copies it into dest.
  *
- * Retourne 1 si une copie valide a ete trouvee, 0 sinon — auquel cas
- * dest n'est pas modifie. L'absence de copie valide signifie une
- * carte vierge ou des metadonnees detruites : dans les deux cas, le
- * bootloader doit passer en mode reception.
+ * Returns 1 if a valid copy was found, 0 otherwise — in which case
+ * dest is not modified. The absence of a valid copy means either a
+ * blank board or destroyed metadata: in both cases, the bootloader
+ * must enter receive mode.
  */
 int metadata_read(metadata_t *dest);
 
 /*
- * Ecrit une nouvelle version dans la page inactive.
+ * Writes a new version into the inactive page.
  *
- * Les champs magic, counter, reserved et meta_crc32 de src sont
- * ignores : le module les calcule lui-meme. L'appelant ne peut donc
- * pas produire une structure au CRC faux ou au compteur incoherent,
- * meme en essayant.
+ * The magic, counter, reserved and meta_crc32 fields of src are
+ * ignored: the module computes them itself. The caller therefore
+ * cannot produce a structure with a wrong CRC or an inconsistent
+ * counter, even if trying.
  *
- * Seuls sont repris : fw_size, fw_crc32, fw_version, active_slot,
- * state, boot_fail_count.
+ * Only the following are carried over: fw_size, fw_crc32,
+ * fw_version, active_slot, state, boot_fail_count.
  */
 metadata_status_t metadata_write(const metadata_t *src);
 
 /*
- * Efface les deux pages. Ramene la carte a l'etat vierge.
- * Destine aux tests et a une remise a zero volontaire.
+ * Erases both pages. Returns the board to a blank state.
+ * Intended for testing and deliberate factory reset.
  */
 metadata_status_t metadata_erase_all(void);
 
 /*
- * Indique si une copie donnee est structurellement valide.
- * Exposee pour les tests ; le module l'utilise en interne.
+ * Indicates whether a given copy is structurally valid.
+ * Exposed for testing; the module uses it internally.
  */
 int metadata_is_valid(const metadata_t *meta);
 

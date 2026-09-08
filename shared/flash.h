@@ -4,96 +4,93 @@
 #include <stdint.h>
 
 /*
- * Pilote du controleur de flash embarquee du STM32L476RG.
+ * Flash controller driver for the STM32L476RG embedded flash.
  *
- * Contraintes materielles (RM0351 section 3.3.7) :
+ * Hardware constraints (RM0351 section 3.3.7):
  *
- *   - La flash est programmee par double-mot de 72 bits : 64 bits de
- *     donnees plus 8 bits d'ECC. Toute ecriture doit donc porter sur
- *     8 octets, a une adresse alignee sur 8. Un acces octet ou
- *     demi-mot leve SIZERR ; un desalignement leve PGAERR.
+ *   - Flash is programmed in 72-bit double-words: 64 bits of data
+ *     plus 8 ECC bits. Every write must therefore cover 8 bytes at
+ *     an 8-byte-aligned address. A byte or half-word access raises
+ *     SIZERR; a misaligned address raises PGAERR.
  *
- *   - Programmer une adresse deja programmee leve PROGERR, sauf si la
- *     valeur ecrite est entierement nulle. Les bits ECC ne peuvent pas
- *     etre recalcules sans effacement prealable.
+ *   - Programming an already-programmed address raises PROGERR,
+ *     unless the value being written is entirely zero. ECC bits
+ *     cannot be recomputed without a prior erase.
  *
- *   - L'unite d'effacement est la page de 2 Ko. La flash de 1 Mo est
- *     organisee en deux banques de 256 pages, numerotees de 0 a 255
- *     dans chaque banque. Le bit BKER de FLASH_CR selectionne la
- *     banque.
+ *   - The erase unit is a 2 KB page. The 1 MB flash is organized
+ *     in two banks of 256 pages each, numbered 0 to 255 per bank.
+ *     The BKER bit in FLASH_CR selects the bank.
  *
- * Choix de conception
- * -------------------
- * Les fonctions prennent des ADRESSES, jamais des numeros de page. La
- * conversion adresse -> (banque, page) est faite ici, au seul endroit
- * qui connait le dual-bank. Le reste du firmware raisonne en adresses,
- * comme metadata.h les definit.
+ * Design choices
+ * --------------
+ * Functions take ADDRESSES, never page numbers. The address ->
+ * (bank, page) conversion is done here, at the only place that
+ * knows about the dual-bank layout. The rest of the firmware
+ * reasons in addresses, as defined by metadata.h.
  *
- * Le controleur est deverrouille puis reverrouille a l'interieur de
- * chaque operation. La flash n'est donc accessible en ecriture que
- * pendant les quelques microsecondes d'un effacement ou d'une
- * programmation, jamais pendant le parsing de trames ou l'attente.
- * Un pointeur qui derape a ce moment-la ne peut pas ecraser le
- * bootloader. flash_unlock() n'est volontairement pas exposee : une
- * API qui rend l'erreur impossible vaut mieux qu'une API qui la
- * deconseille.
+ * The controller is unlocked then re-locked inside each operation.
+ * Flash is therefore writable only during the few microseconds of
+ * an erase or a program, never during frame parsing or idle waiting.
+ * A stray pointer at that moment cannot overwrite the bootloader.
+ * flash_unlock() is intentionally not exported: an API that makes
+ * the error impossible is better than one that merely discourages it.
  *
- * Le read-back est integre a flash_write() et non optionnel. Dans un
- * bootloader, aucune ecriture n'est dispensable de verification : tout
- * octet ecrit fait partie d'un firmware qui doit etre exact. Rendre la
- * verification separee creerait la possibilite de l'oublier sans
- * jamais apporter de benefice.
+ * Read-back is integrated into flash_write() and is not optional.
+ * In a bootloader, no write can be exempt from verification: every
+ * byte written is part of a firmware that must be exact. Making
+ * verification separate would create the possibility of forgetting
+ * it without ever providing a benefit.
  *
- * Les longueurs et adresses non alignees sont REFUSEES plutot que
- * compensees. Le protocole utilise des blocs de 256 octets,
- * precisement choisis pour que la contrainte ne se pose jamais. Un
- * appel desaligne signale donc un bug de l'appelant, qu'il vaut mieux
- * voir immediatement que masquer.
+ * Non-aligned lengths and addresses are REJECTED rather than
+ * compensated for. The protocol uses 256-byte blocks, chosen
+ * precisely so that this constraint never arises. A misaligned
+ * call therefore signals a caller bug, which is better seen
+ * immediately than silently masked.
  *
- * NON REENTRANT : le controleur est une ressource partagee a etat.
+ * NOT REENTRANT: the controller is a stateful shared resource.
  */
 
 typedef enum {
     FLASH_OK = 0,
-    FLASH_ERR_ALIGN,      /* adresse ou longueur non multiple de 8    */
-    FLASH_ERR_RANGE,      /* hors des limites de la flash             */
-    FLASH_ERR_LOCKED,     /* echec de la sequence de deverrouillage   */
-    FLASH_ERR_BUSY,       /* operation encore en cours au demarrage   */
-    FLASH_ERR_PROG,       /* erreur signalee par le controleur        */
-    FLASH_ERR_VERIFY      /* relecture differente de ce qui est ecrit */
+    FLASH_ERR_ALIGN,      /* address or length not a multiple of 8    */
+    FLASH_ERR_RANGE,      /* outside flash bounds                     */
+    FLASH_ERR_LOCKED,     /* unlock sequence failed                   */
+    FLASH_ERR_BUSY,       /* operation still in progress at startup   */
+    FLASH_ERR_PROG,       /* error reported by the controller         */
+    FLASH_ERR_VERIFY      /* read-back differs from what was written  */
 } flash_status_t;
 
 /*
- * Efface la page de 2 Ko contenant l'adresse fournie.
+ * Erases the 2 KB page containing the given address.
  *
- * L'adresse doit etre alignee sur une frontiere de page, sans quoi
- * FLASH_ERR_ALIGN est retourne : effacer 2 Ko a partir d'une adresse
- * quelconque detruirait des donnees que l'appelant ne croit pas viser.
+ * The address must be aligned to a page boundary, otherwise
+ * FLASH_ERR_ALIGN is returned: erasing 2 KB from an arbitrary
+ * address would destroy data the caller did not intend to target.
  *
- * Une page effacee contient 0xFF sur toute son etendue.
+ * An erased page contains 0xFF throughout.
  */
 flash_status_t flash_erase_page(uint32_t address);
 
 /*
- * Ecrit len octets a l'adresse fournie, puis relit pour verifier.
+ * Writes len bytes at the given address, then reads back to verify.
  *
- * address et len doivent tous deux etre multiples de 8. La zone visee
- * doit avoir ete effacee au prealable, sans quoi le controleur leve
- * PROGERR et FLASH_ERR_PROG est retourne.
+ * address and len must both be multiples of 8. The target area
+ * must have been erased beforehand, otherwise the controller raises
+ * PROGERR and FLASH_ERR_PROG is returned.
  */
 flash_status_t flash_write(uint32_t address, const uint8_t *data, uint32_t len);
 
 /*
- * Verifie qu'une zone est entierement effacee (0xFF partout).
- * Utile avant d'ecrire, pour distinguer un slot vierge d'un slot
- * partiellement programme.
+ * Checks that a region is fully erased (0xFF everywhere).
+ * Useful before writing, to distinguish a blank slot from a
+ * partially programmed one.
  */
 int flash_is_erased(uint32_t address, uint32_t len);
 
 /*
- * La flash est mappee en memoire : la lecture ne demande aucune
- * fonction particuliere, un dereferencement suffit. Ce helper existe
- * pour la lisibilite du code appelant.
+ * Flash is memory-mapped: reading requires no special function,
+ * a dereference is sufficient. This helper exists for readability
+ * in the calling code.
  */
 static inline const uint8_t *flash_ptr(uint32_t address)
 {

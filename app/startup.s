@@ -4,29 +4,29 @@
 .thumb
 
 /* =========================================================
-   RESET HANDLER — premier code execute apres le reset
+   RESET HANDLER — first code executed after reset
    ========================================================= */
     .section  .text.Reset_Handler
     .weak     Reset_Handler
     .type     Reset_Handler, %function
 
 Reset_Handler:
-    /* 1. Charger le stack pointer.
-          Le processeur l'a deja fait depuis la vector table ; cette
-          ligne garantit un etat correct si l'on arrive ici autrement
-          qu'au reset. */
+    /* 1. Load the stack pointer.
+          The processor has already done this from the vector table;
+          this line guarantees a correct state if we arrive here by
+          any means other than a reset. */
     ldr   sp, =_estack
 
-    /* 2. Copier .data de la FLASH vers la RAM.
-          Les valeurs initiales des variables globales sont stockees
-          en flash ; leur emplacement d'execution est en RAM. */
+    /* 2. Copy .data from FLASH to RAM.
+          Initial values of global variables are stored in flash;
+          their execution location is in RAM. */
     movs  r1, #0
     b     LoopCopyDataInit
 
 CopyDataInit:
-    ldr   r3, =_sidata          /* adresse source en flash    */
-    ldr   r3, [r3, r1]          /* lire un mot de 32 bits     */
-    str   r3, [r0, r1]          /* l'ecrire en RAM            */
+    ldr   r3, =_sidata          /* source address in flash    */
+    ldr   r3, [r3, r1]          /* read a 32-bit word         */
+    str   r3, [r0, r1]          /* write it to RAM            */
     adds  r1, r1, #4
 
 LoopCopyDataInit:
@@ -36,9 +36,9 @@ LoopCopyDataInit:
     cmp   r2, r3
     bcc   CopyDataInit
 
-    /* 3. Mettre .bss a zero.
-          Le standard C garantit que les globales non initialisees
-          valent zero au demarrage. */
+    /* 3. Zero-fill .bss.
+          The C standard guarantees that uninitialised globals are
+          zero at startup. */
     ldr   r2, =_sbss
     b     LoopFillZerobss
 
@@ -51,10 +51,10 @@ LoopFillZerobss:
     cmp   r2, r3
     bcc   FillZerobss
 
-    /* 4. Appeler main() */
+    /* 4. Call main() */
     bl    main
 
-    /* main() ne doit jamais retourner en embarque */
+    /* main() must never return in an embedded system */
 LoopForever:
     b     LoopForever
 
@@ -62,12 +62,11 @@ LoopForever:
 
 
 /* =========================================================
-   HANDLER PAR DEFAUT
+   DEFAULT HANDLER
 
-   Toutes les entrees de la table doivent pointer quelque part.
-   Celles qui ne sont pas implementees atterrissent ici. En debug,
-   un programme bloque dans Infinite_Loop signale une interruption
-   non geree — souvent un HardFault.
+   Every vector table entry must point somewhere. Unimplemented
+   ones land here. In debug, a program stuck in Infinite_Loop
+   signals an unhandled interrupt — often a HardFault.
    ========================================================= */
     .section  .text.Default_Handler,"ax",%progbits
 
@@ -81,38 +80,38 @@ Infinite_Loop:
 /* =========================================================
    VECTOR TABLE
 
-   Tableau d'adresses place au tout debut de la flash. Le
-   processeur y pioche selon l'evenement : au reset il lit les
-   deux premieres entrees, a une interruption celle qui
-   correspond a son numero.
+   Array of addresses placed at the very start of flash. The
+   processor indexes it based on the event: at reset it reads
+   the first two entries, at an interrupt the one matching its
+   number.
 
-   Les 16 premieres entrees sont les exceptions systeme definies
-   par ARM, communes a tous les Cortex-M. Viennent ensuite les
-   interruptions peripheriques, propres au STM32L4.
+   The first 16 entries are the system exceptions defined by
+   ARM, common to all Cortex-M. The peripheral interrupts
+   specific to the STM32L4 follow.
    ========================================================= */
     .section  .isr_vector,"a",%progbits
     .type     g_pfnVectors, %object
 
 g_pfnVectors:
-    /* --- Exceptions systeme ARM --- */
-    .word _estack                       /* 0x00  stack pointer initial */
+    /* --- ARM system exceptions --- */
+    .word _estack                       /* 0x00  initial stack pointer */
     .word Reset_Handler                 /* 0x04  reset                 */
     .word NMI_Handler                   /* 0x08 */
     .word HardFault_Handler             /* 0x0C */
     .word MemManage_Handler             /* 0x10 */
     .word BusFault_Handler              /* 0x14 */
     .word UsageFault_Handler            /* 0x18 */
-    .word 0                             /* 0x1C  reserve */
-    .word 0                             /* 0x20  reserve */
-    .word 0                             /* 0x24  reserve */
-    .word 0                             /* 0x28  reserve */
+    .word 0                             /* 0x1C  reserved */
+    .word 0                             /* 0x20  reserved */
+    .word 0                             /* 0x24  reserved */
+    .word 0                             /* 0x28  reserved */
     .word SVC_Handler                   /* 0x2C */
     .word DebugMon_Handler              /* 0x30 */
-    .word 0                             /* 0x34  reserve */
+    .word 0                             /* 0x34  reserved */
     .word PendSV_Handler                /* 0x38 */
     .word SysTick_Handler               /* 0x3C */
 
-    /* --- Interruptions peripheriques STM32L4 --- */
+    /* --- STM32L4 peripheral interrupts --- */
     .word WWDG_IRQHandler                     /* IRQ  0 */
     .word PVD_PVM_IRQHandler                  /* IRQ  1 */
     .word TAMP_STAMP_IRQHandler               /* IRQ  2 */
@@ -151,20 +150,19 @@ g_pfnVectors:
     .word SPI1_IRQHandler                     /* IRQ 35 */
     .word SPI2_IRQHandler                     /* IRQ 36 */
     .word USART1_IRQHandler                   /* IRQ 37 */
-    .word USART2_IRQHandler                   /* IRQ 38  <-- notre handler */
+    .word USART2_IRQHandler                   /* IRQ 38  <- our handler */
 
 
 /* =========================================================
-   ALIAS FAIBLES
+   WEAK ALIASES
 
-   Chaque handler pointe vers Default_Handler par defaut. Une
-   definition FORTE du meme nom ailleurs dans le projet — par
-   exemple USART2_IRQHandler dans uart.c — remplace
-   automatiquement l'alias : le linker retient toujours la
-   definition forte.
+   Each handler points to Default_Handler by default. A STRONG
+   definition of the same name elsewhere in the project — for
+   example USART2_IRQHandler in uart.c — automatically replaces
+   the alias: the linker always retains the strong definition.
 
-   C'est ce qui permet d'implementer un handler sans jamais
-   modifier cette table.
+   This is what allows implementing a handler without ever
+   modifying this table.
    ========================================================= */
 
     .weak NMI_Handler

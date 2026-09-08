@@ -1,14 +1,14 @@
-# ---------- Outils ----------
+# ---------- Tools ----------
 CC      = arm-none-eabi-gcc
 OBJCOPY = arm-none-eabi-objcopy
 SIZE    = arm-none-eabi-size
 
-# ---------- Nom du projet ----------
+# ---------- Project name ----------
 TARGET  = bootloader
 
-# ---------- Fichiers sources ----------
+# ---------- Source files ----------
 SRCS = main.c startup.s src/crc.c src/flash.c src/metadata_mgr.c src/uart.c src/protocol_mgr.c src/systick.c
-# ---------- Options de compilation ----------
+# ---------- Compilation options ----------
 CPU     = -mcpu=cortex-m4 -mthumb
 FPU     = -mfpu=fpv4-sp-d16 -mfloat-abi=hard
 
@@ -19,14 +19,14 @@ CFLAGS += -ffreestanding
 CFLAGS += -ffunction-sections -fdata-sections
 CFLAGS += -I../shared
 
-# ---------- Options d'édition de liens ----------
+# ---------- Linker options ----------
 LDFLAGS  = $(CPU) $(FPU)
 LDFLAGS += -T linker.ld
 LDFLAGS += -nostdlib
 LDFLAGS += -Wl,--gc-sections
 LDFLAGS += -Wl,-Map=$(TARGET).map
 
-# ---------- Règles ----------
+# ---------- Rules ----------
 all: $(TARGET).bin
 
 $(TARGET).elf: $(SRCS) linker.ld

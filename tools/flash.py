@@ -1,18 +1,17 @@
-#!/usr/bin/env python3
 """
-Outil de mise a jour firmware par liaison serie.
+Firmware update tool over serial link.
 
     ./flash.py --port /dev/ttyACM0 --dir build/
     ./flash.py --port /dev/ttyACM0 --info
     ./flash.py --port /dev/ttyACM0 --file app_slotB.bin --slot B
 
-Le binaire envoye depend du slot libre annonce par la carte : c'est
-elle qui detient l'etat, pas l'outil. En mode --dir, le fichier est
-choisi automatiquement parmi app_slotA.bin et app_slotB.bin.
+The binary sent depends on the free slot announced by the board: it
+is the board that holds the state, not the tool. In --dir mode, the
+file is chosen automatically from app_slotA.bin and app_slotB.bin.
 
-Ce choix decoule de l'architecture dual-slot : l'application est liee
-a une adresse fixe, donc compilee deux fois, une par emplacement. Voir
-PROTOCOL.md pour les alternatives ecartees.
+This choice follows from the dual-slot architecture: the application
+is linked to a fixed address, so compiled twice, once per slot. See
+PROTOCOL.md for the discarded alternatives.
 """
 
 import argparse
@@ -26,269 +25,268 @@ from transport import SerialTransport, TransportError, Timeout, Disconnected
 
 
 # ---------------------------------------------------------------
-# Affichage
+# Display
 # ---------------------------------------------------------------
 class Term:
-    GRIS  = "\033[90m"
-    VERT  = "\033[92m"
-    ROUGE = "\033[91m"
-    JAUNE = "\033[93m"
-    BLEU  = "\033[94m"
-    GRAS  = "\033[1m"
-    FIN   = "\033[0m"
+    GREY   = "\033[90m"
+    GREEN  = "\033[92m"
+    RED    = "\033[91m"
+    YELLOW = "\033[93m"
+    BLUE   = "\033[94m"
+    BOLD   = "\033[1m"
+    END    = "\033[0m"
 
-    actif = sys.stdout.isatty()
+    active = sys.stdout.isatty()
 
     @classmethod
-    def c(cls, texte, couleur):
-        return f"{couleur}{texte}{cls.FIN}" if cls.actif else texte
+    def c(cls, text, color):
+        return f"{color}{text}{cls.END}" if cls.active else text
 
 
 def info(msg):    print(f"  {msg}")
-def succes(msg):  print(f"  {Term.c('OK', Term.VERT)}    {msg}")
-def echec(msg):   print(f"  {Term.c('ECHEC', Term.ROUGE)} {msg}")
-def etape(msg):   print(f"\n{Term.c(msg, Term.GRAS)}")
+def success(msg): print(f"  {Term.c('OK', Term.GREEN)}    {msg}")
+def failure(msg): print(f"  {Term.c('FAILED', Term.RED)} {msg}")
+def step(msg):    print(f"\n{Term.c(msg, Term.BOLD)}")
 
 
-def barre(courant, total, largeur=40):
-    frac = courant / total if total else 1.0
-    plein = int(frac * largeur)
-    trait = "#" * plein + "-" * (largeur - plein)
+def progress_bar(current, total, width=40):
+    frac = current / total if total else 1.0
+    filled = int(frac * width)
+    bar = "#" * filled + "-" * (width - filled)
     pct = int(frac * 100)
-    sys.stdout.write(f"\r  [{trait}] {pct:3}%  {courant}/{total} octets")
+    sys.stdout.write(f"\r  [{bar}] {pct:3}%  {current}/{total} bytes")
     sys.stdout.flush()
 
 
-def duree_estimee(octets, baudrate=115200):
-    """Chaque octet occupe 10 bits sur la ligne : start + 8 + stop."""
-    trames = (octets + p.DATA_BLOCK_SIZE - 1) // p.DATA_BLOCK_SIZE
-    total = octets + trames * p.FRAME_OVERHEAD
+def estimated_duration(size_bytes, baudrate=115200):
+    """Each byte occupies 10 bits on the line: start + 8 data + stop."""
+    frames = (size_bytes + p.DATA_BLOCK_SIZE - 1) // p.DATA_BLOCK_SIZE
+    total = size_bytes + frames * p.FRAME_OVERHEAD
     return total * 10 / baudrate
 
 
 # ---------------------------------------------------------------
 # Operations
 # ---------------------------------------------------------------
-def lire_info(tr) -> p.InfoResponse:
+def read_info(tr) -> p.InfoResponse:
     rep = tr.exchange(p.Frame(p.CMD_GET_INFO, 0))
 
     if rep.cmd == p.RSP_NACK:
         code = rep.data[0] if rep.data else 0
-        raise TransportError(f"GET_INFO refuse : {p.ERROR_NAMES.get(code, code)}")
+        raise TransportError(f"GET_INFO rejected: {p.ERROR_NAMES.get(code, code)}")
 
     if rep.cmd != p.RSP_INFO:
-        raise TransportError(f"reponse inattendue : {rep}")
+        raise TransportError(f"unexpected response: {rep}")
 
     return p.InfoResponse.unpack(rep.data)
 
 
-def afficher_info(nfo: p.InfoResponse):
+def print_info(nfo: p.InfoResponse):
     def version(v):
         return f"{(v >> 16) & 0xFF}.{(v >> 8) & 0xFF}.{v & 0xFF}"
 
-    info(f"protocole      : v{nfo.proto_version}")
+    info(f"protocol       : v{nfo.proto_version}")
     info(f"bootloader     : v{version(nfo.bl_version)}")
-    info(f"firmware actif : v{version(nfo.fw_version)}")
-    info(f"slot actif     : {'AB'[nfo.active_slot]}")
-    info(f"slot libre     : {Term.c('AB'[nfo.free_slot], Term.BLEU)}")
-    info(f"etat           : {p.STATE_NAMES.get(nfo.state, nfo.state)}")
+    info(f"active firmware: v{version(nfo.fw_version)}")
+    info(f"active slot    : {'AB'[nfo.active_slot]}")
+    info(f"free slot      : {Term.c('AB'[nfo.free_slot], Term.BLUE)}")
+    info(f"state          : {p.STATE_NAMES.get(nfo.state, nfo.state)}")
 
 
-def choisir_binaire(dossier: str, slot: int) -> str:
+def choose_binary(directory: str, slot: int) -> str:
     """
-    Selectionne le binaire correspondant au slot libre.
+    Selects the binary corresponding to the free slot.
 
-    Le firmware est lie a une adresse fixe : app_slotA.bin ne
-    fonctionne qu'a l'adresse du slot A. Envoyer le mauvais produirait
-    une image au CRC parfaitement valide mais inexecutable — cas que
-    le bootloader rattrape via l'etat TESTING, mais qu'on evite ici.
+    The firmware is linked to a fixed address: app_slotA.bin only
+    works at slot A's address. Sending the wrong one would produce
+    an image with a perfectly valid CRC but that cannot execute —
+    a case the bootloader catches via the TESTING state, but avoided here.
     """
-    nom = f"app_slot{'AB'[slot]}.bin"
-    chemin = os.path.join(dossier, nom)
+    name = f"app_slot{'AB'[slot]}.bin"
+    path = os.path.join(directory, name)
 
-    if not os.path.isfile(chemin):
+    if not os.path.isfile(path):
         raise SystemExit(
-            f"{chemin} introuvable.\n"
-            f"L'architecture dual-slot exige deux binaires, un par\n"
-            f"emplacement. Verifiez que le Makefile de l'application\n"
-            f"produit app_slotA.bin et app_slotB.bin."
+            f"{path} not found.\n"
+            f"The dual-slot architecture requires two binaries, one per\n"
+            f"slot. Check that the application Makefile produces\n"
+            f"app_slotA.bin and app_slotB.bin."
         )
-    return chemin
+    return path
 
 
-def envoyer(tr, firmware: bytes, slot: int, version: int,
-            baudrate: int) -> bool:
+def send_firmware(tr, firmware: bytes, slot: int, version: int,
+                  baudrate: int) -> bool:
     crc = crc32_stm32(firmware)
-    blocs = list(p.split_firmware(firmware))
+    blocks = list(p.split_firmware(firmware))
 
-    etape("Transfert")
-    info(f"taille   : {len(firmware)} octets")
+    step("Transfer")
+    info(f"size     : {len(firmware)} bytes")
     info(f"CRC32    : 0x{crc:08X}")
-    info(f"blocs    : {len(blocs)} x {p.DATA_BLOCK_SIZE}")
-    info(f"cible    : slot {'AB'[slot]}")
-    info(f"estime   : {duree_estimee(len(firmware), baudrate):.1f} s")
+    info(f"blocks   : {len(blocks)} x {p.DATA_BLOCK_SIZE}")
+    info(f"target   : slot {'AB'[slot]}")
+    info(f"estimate : {estimated_duration(len(firmware), baudrate):.1f} s")
     print()
 
-    # --- annonce ---
+    # --- announce ---
     su = p.StartUpdate(len(firmware), crc, version, slot)
     rep = tr.exchange(p.Frame(p.CMD_START_UPDATE, 0, su.pack()))
 
     if rep.cmd == p.RSP_NACK:
         code = rep.data[0] if rep.data else 0
-        echec(f"transfert refuse : {p.ERROR_NAMES.get(code, code)}")
+        failure(f"transfer rejected: {p.ERROR_NAMES.get(code, code)}")
         if code == p.ERR_SLOT:
-            info("le binaire ne correspond pas au slot annonce par la carte")
+            info("the binary does not match the slot announced by the board")
         elif code == p.ERR_SIZE:
-            info("firmware trop volumineux pour le slot")
+            info("firmware too large for the slot")
         return False
 
-    # --- blocs ---
-    debut = time.time()
-    envoyes = 0
+    # --- blocks ---
+    start = time.time()
+    sent = 0
     seq = 1
 
-    for bloc in blocs:
+    for block in blocks:
         try:
-            rep = tr.exchange(p.Frame(p.CMD_DATA, seq, bloc))
+            rep = tr.exchange(p.Frame(p.CMD_DATA, seq, block))
         except Disconnected:
             print()
             raise
         except TransportError as e:
             print()
-            echec(f"bloc {seq}/{len(blocs)} : {e}")
-            info(f"{envoyes} octets transmis avant l'echec")
+            failure(f"block {seq}/{len(blocks)}: {e}")
+            info(f"{sent} bytes transmitted before failure")
             return False
 
         if rep.cmd == p.RSP_NACK:
             print()
             code = rep.data[0] if rep.data else 0
-            echec(f"bloc {seq} refuse : {p.ERROR_NAMES.get(code, code)}")
+            failure(f"block {seq} rejected: {p.ERROR_NAMES.get(code, code)}")
             return False
 
-        envoyes += len(bloc)
+        sent += len(block)
         seq += 1
-        barre(envoyes, len(firmware))
+        progress_bar(sent, len(firmware))
 
     print()
-    ecoule = time.time() - debut
-    debit = len(firmware) / ecoule if ecoule > 0 else 0
-    info(f"transmis en {ecoule:.1f} s ({debit:.0f} o/s)")
+    elapsed = time.time() - start
+    throughput = len(firmware) / elapsed if elapsed > 0 else 0
+    info(f"transmitted in {elapsed:.1f} s ({throughput:.0f} B/s)")
 
-    # --- cloture ---
-    etape("Verification")
-    info("relecture de la flash et calcul du CRC global...")
+    # --- finalise ---
+    step("Verification")
+    info("re-reading flash and computing global CRC...")
 
     try:
         rep = tr.exchange(p.Frame(p.CMD_END_UPDATE, seq), retries=1)
     except Timeout:
-        # La verification relit tout le slot ; sur un gros firmware
-        # cela depasse le timeout ordinaire.
+        # Verification re-reads the entire slot; on a large firmware
+        # this exceeds the ordinary timeout.
         rep = tr.receive(timeout=10.0)
 
     if rep.cmd == p.RSP_NACK:
         code = rep.data[0] if rep.data else 0
-        echec(f"verification echouee : {p.ERROR_NAMES.get(code, code)}")
+        failure(f"verification failed: {p.ERROR_NAMES.get(code, code)}")
         if code == p.ERR_GLOBAL_CRC:
-            info("le contenu relu differe du firmware envoye")
+            info("content read back differs from firmware sent")
         return False
 
-    succes("CRC global verifie")
-    succes("image marquee TESTING")
-    info("la carte redemarre ; l'application doit se confirmer")
+    success("global CRC verified")
+    success("image marked TESTING")
+    info("board rebooting; application must confirm itself")
     return True
 
 
 # ---------------------------------------------------------------
 def main():
     ap = argparse.ArgumentParser(
-        description="Mise a jour firmware par liaison serie",
+        description="Firmware update over serial link",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__)
 
     ap.add_argument("--port", default="/dev/ttyACM0")
     ap.add_argument("--baud", type=int, default=115200)
-    ap.add_argument("--dir", help="dossier contenant app_slotA.bin et app_slotB.bin")
-    ap.add_argument("--file", help="binaire explicite")
+    ap.add_argument("--dir", help="directory containing app_slotA.bin and app_slotB.bin")
+    ap.add_argument("--file", help="explicit binary")
     ap.add_argument("--slot", choices=["A", "B"],
-                    help="forcer le slot cible (avec --file)")
+                    help="force target slot (with --file)")
     ap.add_argument("--version", default="0.1.0",
-                    help="version du firmware, format M.m.p")
+                    help="firmware version, format M.m.p")
     ap.add_argument("--info", action="store_true",
-                    help="interroger la carte sans rien envoyer")
+                    help="query the board without sending anything")
     ap.add_argument("--verbose", action="store_true")
 
     args = ap.parse_args()
 
     if not args.info and not args.dir and not args.file:
-        ap.error("indiquez --dir, --file ou --info")
+        ap.error("specify --dir, --file or --info")
 
     try:
         maj, mnr, pch = (int(x) for x in args.version.split("."))
         version = (maj << 16) | (mnr << 8) | pch
     except ValueError:
-        ap.error("version attendue au format M.m.p")
+        ap.error("version expected in M.m.p format")
 
-    print(Term.c("\nMise a jour firmware", Term.GRAS))
-    print(f"  port {args.port} @ {args.baud} bauds")
+    print(Term.c("\nFirmware update", Term.BOLD))
+    print(f"  port {args.port} @ {args.baud} baud")
 
-    # Un message de diagnostic doit decrire l'etat reel de la carte.
-    # Sans ce drapeau, une deconnexion survenue AVANT le transfert
-    # afficherait un avertissement sur une image partielle qui
-    # n'existe pas — envoyant chercher au mauvais endroit.
-    transfert_commence = False
+    # A diagnostic message must describe the real state of the board.
+    # Without this flag, a disconnection that occurred BEFORE the
+    # transfer would warn about a partial image that does not exist.
+    transfer_started = False
 
     try:
         with SerialTransport(args.port, args.baud, verbose=args.verbose) as tr:
 
-            etape("Etat de la carte")
-            nfo = lire_info(tr)
-            afficher_info(nfo)
+            step("Board status")
+            nfo = read_info(tr)
+            print_info(nfo)
 
             if nfo.proto_version != p.PROTO_VERSION:
-                echec(f"protocole v{nfo.proto_version} cote carte, "
-                      f"v{p.PROTO_VERSION} cote outil")
+                failure(f"protocol v{nfo.proto_version} on board, "
+                        f"v{p.PROTO_VERSION} in tool")
                 return 1
 
             if args.info:
                 print()
                 return 0
 
-            # --- choix du binaire ---
+            # --- choose binary ---
             if args.file:
-                chemin = args.file
+                path = args.file
                 slot = nfo.free_slot
                 if args.slot:
                     slot = 0 if args.slot == "A" else 1
                     if slot != nfo.free_slot:
-                        echec(f"la carte attend le slot "
-                              f"{'AB'[nfo.free_slot]}, pas {args.slot}")
+                        failure(f"board expects slot "
+                                f"{'AB'[nfo.free_slot]}, not {args.slot}")
                         return 1
             else:
-                chemin = choisir_binaire(args.dir, nfo.free_slot)
+                path = choose_binary(args.dir, nfo.free_slot)
                 slot = nfo.free_slot
 
-            with open(chemin, "rb") as f:
+            with open(path, "rb") as f:
                 firmware = f.read()
 
             if not firmware:
-                echec(f"{chemin} est vide")
+                failure(f"{path} is empty")
                 return 1
 
-            info(f"fichier        : {os.path.basename(chemin)}")
+            info(f"file           : {os.path.basename(path)}")
 
-            # --- alignement ---
-            reste = len(firmware) % 8
-            if reste:
-                # La flash ne se programme que par double-mot. Un
-                # firmware non aligne est complete avec 0xFF, valeur
-                # d'une cellule effacee, donc neutre.
-                comble = 8 - reste
-                firmware += b"\xFF" * comble
-                info(f"complete de {comble} octets (alignement 64 bits)")
+            # --- alignment ---
+            remainder = len(firmware) % 8
+            if remainder:
+                # Flash only programs in double-words. A non-aligned
+                # firmware is padded with 0xFF, the value of an erased
+                # cell, which is therefore neutral.
+                padding = 8 - remainder
+                firmware += b"\xFF" * padding
+                info(f"padded by {padding} bytes (64-bit alignment)")
 
-            transfert_commence = True
+            transfer_started = True
 
-            if not envoyer(tr, firmware, slot, version, args.baud):
+            if not send_firmware(tr, firmware, slot, version, args.baud):
                 print()
                 return 1
 
@@ -296,30 +294,30 @@ def main():
             return 0
 
     except KeyboardInterrupt:
-        print("\n\n  interrompu")
+        print("\n\n  interrupted")
         return 130
 
     except Disconnected as e:
         print()
-        echec(str(e))
-        if transfert_commence:
-            info("le slot cible contient une image partielle ; ses")
-            info("metadonnees restent en IN_PROGRESS, ce que le")
-            info("bootloader saura interpreter au prochain demarrage.")
-            info("Le slot actif n'a pas ete touche : la carte demarre")
-            info("normalement sur son firmware precedent.")
+        failure(str(e))
+        if transfer_started:
+            info("the target slot contains a partial image; its")
+            info("metadata remains IN_PROGRESS, which the bootloader")
+            info("will interpret correctly at next boot.")
+            info("The active slot was not touched: the board boots")
+            info("normally on its previous firmware.")
         else:
-            info("aucun transfert n'avait commence : la carte est intacte")
-            info("verifiez le cable, rebranchez, puis relancez")
+            info("no transfer had started: the board is intact")
+            info("check the cable, reconnect, then retry")
         return 1
 
     except TransportError as e:
         print()
-        echec(str(e))
-        info("verifiez que la carte est en mode reception "
-             "et qu'aucun terminal ne retient le port")
-        info("la fenetre d'ecoute du bootloader ne dure que 2 s "
-             "apres le reset")
+        failure(str(e))
+        info("check that the board is in receive mode "
+             "and that no terminal is holding the port")
+        info("the bootloader's listen window only lasts 2 s "
+             "after reset")
         return 1
 
 

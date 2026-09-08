@@ -1,15 +1,13 @@
 /* =========================================================
  * Application — SLOT B
  *
- * Un binaire compile est lie a une adresse fixe : les appels
- * de fonction et les references aux variables globales y sont
- * graves en dur. Ce binaire ne fonctionne donc qu'a l'adresse
- * du slot B.
+ * A compiled binary is linked to a fixed address: function calls
+ * and global variable references are hard-coded into it. This
+ * binary therefore only works at the slot B address.
  *
- * C'est pourquoi l'application est compilee deux fois, une
- * fois par emplacement. Voir PROTOCOL.md, section sur les
- * alternatives ecartees (code position-independent, recopie
- * vers un slot d'execution unique, bank swap materiel).
+ * This is why the application is compiled twice, once per slot.
+ * See PROTOCOL.md, section on discarded alternatives (PIC,
+ * copy-to-a-single-execution-slot, hardware bank swap).
  * ========================================================= */
 
 ENTRY(Reset_Handler)

@@ -1,12 +1,11 @@
 """
-Encodage et decodage des trames du protocole de mise a jour firmware.
+Frame encoding and decoding for the firmware update protocol.
 
-Independant du transport : ce module ne connait ni port serie, ni CAN.
-Il traduit des octets en trames et inversement, rien de plus.
+Transport-independent: this module knows neither serial port nor CAN.
+It translates bytes into frames and vice versa, nothing more.
 
-Les constantes doivent rester synchronisees avec shared/protocol.h.
-Voir PROTOCOL.md pour la specification complete et les justifications
-de conception.
+Constants must remain synchronised with shared/protocol.h.
+See PROTOCOL.md for the full specification and design rationale.
 """
 
 import struct
@@ -14,7 +13,7 @@ from dataclasses import dataclass
 from crc32 import crc32_stm32
 
 # ---------------------------------------------------------------
-# Constantes — miroir de shared/protocol.h
+# Constants — mirror of shared/protocol.h
 # ---------------------------------------------------------------
 PROTO_VERSION = 1
 
@@ -24,22 +23,22 @@ FRAME_HEADER_SIZE = 7          # MAGIC(2) + CMD(1) + LENGTH(2) + SEQ(2)
 FRAME_CRC_SIZE = 4
 FRAME_OVERHEAD = FRAME_HEADER_SIZE + FRAME_CRC_SIZE
 
-DATA_BLOCK_SIZE = 256          # multiple de 8, diviseur de 2048
-MAX_PAYLOAD_SIZE = 1024        # borne de plausibilite sur LENGTH
+DATA_BLOCK_SIZE = 256          # multiple of 8, divisor of 2048
+MAX_PAYLOAD_SIZE = 1024        # plausibility bound on LENGTH
 
-# Requetes (PC -> bootloader)
+# Requests (PC -> bootloader)
 CMD_GET_INFO = 0x01
 CMD_START_UPDATE = 0x02
 CMD_DATA = 0x03
 CMD_END_UPDATE = 0x04
 CMD_ABORT = 0x05
 
-# Reponses (bootloader -> PC), bit 7 a 1
+# Responses (bootloader -> PC), bit 7 set
 RSP_INFO = 0x81
 RSP_ACK = 0x82
 RSP_NACK = 0x83
 
-# Codes d'erreur, payload d'un RSP_NACK
+# Error codes, payload of RSP_NACK
 ERR_CRC = 0x01
 ERR_SEQ = 0x02
 ERR_LENGTH = 0x03
@@ -77,7 +76,7 @@ CMD_NAMES = {
 SLOT_A = 0
 SLOT_B = 1
 
-# Etats du firmware
+# Firmware states
 STATE_EMPTY = 0x00
 STATE_IN_PROGRESS = 0x01
 STATE_TESTING = 0x02
@@ -95,27 +94,27 @@ STATE_NAMES = {
 # Exceptions
 # ---------------------------------------------------------------
 class ProtocolError(Exception):
-    """Erreur generique de protocole."""
+    """Generic protocol error."""
 
 
 class BadMagic(ProtocolError):
-    """Le preambule attendu n'est pas present."""
+    """Expected preamble not present."""
 
 
 class BadCRC(ProtocolError):
-    """Le CRC calcule ne correspond pas au CRC recu."""
+    """Computed CRC does not match received CRC."""
 
 
 class BadLength(ProtocolError):
-    """Le champ LENGTH est hors des bornes acceptees."""
+    """LENGTH field is outside the accepted bounds."""
 
 
 class Incomplete(ProtocolError):
-    """La trame n'est pas encore entierement recue — ce n'est pas une erreur."""
+    """Frame not yet fully received — not an error."""
 
 
 # ---------------------------------------------------------------
-# Trame
+# Frame
 # ---------------------------------------------------------------
 @dataclass
 class Frame:
@@ -129,14 +128,14 @@ class Frame:
 
 
 def encode(frame: Frame) -> bytes:
-    """Serialise une trame en octets prets a transmettre."""
+    """Serialises a frame into bytes ready to transmit."""
     if len(frame.data) > MAX_PAYLOAD_SIZE:
         raise BadLength(
-            f"payload de {len(frame.data)} octets, maximum {MAX_PAYLOAD_SIZE}"
+            f"payload of {len(frame.data)} bytes, maximum {MAX_PAYLOAD_SIZE}"
         )
 
-    # Le CRC couvre CMD + LENGTH + SEQ + DATA, pas le MAGIC :
-    # celui-ci se valide de lui-meme par sa seule reconnaissance.
+    # The CRC covers CMD + LENGTH + SEQ + DATA, not the MAGIC:
+    # the MAGIC validates itself simply by being recognized.
     body = struct.pack("<BHH", frame.cmd, len(frame.data), frame.seq) + frame.data
     crc = crc32_stm32(body)
 
@@ -145,75 +144,74 @@ def encode(frame: Frame) -> bytes:
 
 def decode(raw: bytes) -> Frame:
     """
-    Deserialise une trame complete.
+    Deserialises a complete frame.
 
-    Leve Incomplete si les octets ne suffisent pas encore, ou
-    BadMagic / BadLength / BadCRC selon l'invalidite rencontree.
+    Raises Incomplete if not enough bytes are available, or
+    BadMagic / BadLength / BadCRC depending on the error found.
     """
     if len(raw) < FRAME_HEADER_SIZE:
-        raise Incomplete("en-tete incomplet")
+        raise Incomplete("incomplete header")
 
     if raw[0:2] != MAGIC:
-        raise BadMagic(f"attendu {MAGIC.hex()}, recu {raw[0:2].hex()}")
+        raise BadMagic(f"expected {MAGIC.hex()}, received {raw[0:2].hex()}")
 
     cmd = raw[2]
     length = struct.unpack("<H", raw[3:5])[0]
     seq = struct.unpack("<H", raw[5:7])[0]
 
-    # Verification de plausibilite AVANT toute bufferisation.
-    # Un champ de longueur non borne est un vecteur classique
-    # de debordement de tampon.
+    # Plausibility check BEFORE any buffering.
+    # An unbounded length field is a classic buffer-overflow vector.
     if length > MAX_PAYLOAD_SIZE:
-        raise BadLength(f"LENGTH={length} depasse {MAX_PAYLOAD_SIZE}")
+        raise BadLength(f"LENGTH={length} exceeds {MAX_PAYLOAD_SIZE}")
 
     total = FRAME_OVERHEAD + length
     if len(raw) < total:
-        raise Incomplete(f"{len(raw)}/{total} octets recus")
+        raise Incomplete(f"{len(raw)}/{total} bytes received")
 
     data = raw[FRAME_HEADER_SIZE:FRAME_HEADER_SIZE + length]
-    crc_recu = struct.unpack("<I", raw[FRAME_HEADER_SIZE + length:total])[0]
+    crc_received = struct.unpack("<I", raw[FRAME_HEADER_SIZE + length:total])[0]
 
     body = raw[2:FRAME_HEADER_SIZE + length]
-    crc_calcule = crc32_stm32(body)
+    crc_computed = crc32_stm32(body)
 
-    if crc_recu != crc_calcule:
-        raise BadCRC(f"recu 0x{crc_recu:08X}, calcule 0x{crc_calcule:08X}")
+    if crc_received != crc_computed:
+        raise BadCRC(f"received 0x{crc_received:08X}, computed 0x{crc_computed:08X}")
 
     return Frame(cmd=cmd, seq=seq, data=data)
 
 
 def frame_length(raw: bytes) -> int:
     """
-    Longueur totale de la trame dont l'en-tete commence dans raw.
-    Permet a un recepteur de savoir combien d'octets attendre encore.
+    Total length of the frame whose header starts in raw.
+    Allows a receiver to know how many more bytes to wait for.
     """
     if len(raw) < FRAME_HEADER_SIZE:
-        raise Incomplete("en-tete incomplet")
+        raise Incomplete("incomplete header")
     length = struct.unpack("<H", raw[3:5])[0]
     if length > MAX_PAYLOAD_SIZE:
-        raise BadLength(f"LENGTH={length} depasse {MAX_PAYLOAD_SIZE}")
+        raise BadLength(f"LENGTH={length} exceeds {MAX_PAYLOAD_SIZE}")
     return FRAME_OVERHEAD + length
 
 
 # ---------------------------------------------------------------
-# Payloads structures
+# Structured payloads
 # ---------------------------------------------------------------
 @dataclass
 class StartUpdate:
     """
-    Payload de CMD_START_UPDATE — 16 octets.
-    Miroir exact de start_update_t dans shared/protocol.h.
+    CMD_START_UPDATE payload — 16 bytes.
+    Exact mirror of start_update_t in shared/protocol.h.
 
-    Le nombre de trames n'est volontairement pas transmis : il se
-    deduit de fw_size et de DATA_BLOCK_SIZE. Une donnee redondante
-    pourrait devenir incoherente avec sa source.
+    The frame count is intentionally not transmitted: it is derived
+    from fw_size and DATA_BLOCK_SIZE. A redundant datum could become
+    inconsistent with its source.
     """
     fw_size: int
     fw_crc32: int
     fw_version: int
     target_slot: int
 
-    FORMAT = "<IIIBBH"
+    FORMAT = "<IIIBHB"
 
     def pack(self) -> bytes:
         return struct.pack(
@@ -222,8 +220,8 @@ class StartUpdate:
             self.fw_crc32,
             self.fw_version,
             self.target_slot,
+            0,              # reserved (2 bytes)
             PROTO_VERSION,
-            0,  # reserved
         )
 
     @classmethod
@@ -231,23 +229,23 @@ class StartUpdate:
         expected = struct.calcsize(cls.FORMAT)
         if len(data) != expected:
             raise BadLength(
-                f"START_UPDATE fait {expected} octets, recu {len(data)}"
+                f"START_UPDATE is {expected} bytes, received {len(data)}"
             )
-        size, crc, ver, slot, proto, _ = struct.unpack(cls.FORMAT, data)
+        size, crc, ver, slot, _res, proto = struct.unpack(cls.FORMAT, data)
         if proto != PROTO_VERSION:
-            raise ProtocolError(f"version de protocole {proto} non supportee")
+            raise ProtocolError(f"protocol version {proto} not supported")
         return cls(fw_size=size, fw_crc32=crc, fw_version=ver, target_slot=slot)
 
 
 @dataclass
 class InfoResponse:
     """
-    Payload de RSP_INFO — 12 octets.
-    Miroir exact de info_response_t dans shared/protocol.h.
+    RSP_INFO payload — 12 bytes.
+    Exact mirror of info_response_t in shared/protocol.h.
 
-    active_slot et free_slot sont mutuellement deductibles. Cette
-    redondance est volontaire : la decision "ou ecrire" revient au
-    bootloader, qui detient l'etat reel.
+    active_slot and free_slot are mutually derivable. This
+    redundancy is intentional: the decision "where to write" belongs
+    to the bootloader, which holds the real state.
     """
     fw_version: int
     bl_version: int
@@ -273,7 +271,7 @@ class InfoResponse:
     def unpack(cls, data: bytes) -> "InfoResponse":
         expected = struct.calcsize(cls.FORMAT)
         if len(data) != expected:
-            raise BadLength(f"RSP_INFO fait {expected} octets, recu {len(data)}")
+            raise BadLength(f"RSP_INFO is {expected} bytes, received {len(data)}")
         return cls(*struct.unpack(cls.FORMAT, data))
 
     def __repr__(self) -> str:
@@ -287,26 +285,26 @@ class InfoResponse:
 
 
 # ---------------------------------------------------------------
-# Utilitaires
+# Utilities
 # ---------------------------------------------------------------
 def split_firmware(data: bytes, block: int = DATA_BLOCK_SIZE):
-    """Decoupe un binaire en blocs. Le dernier peut etre plus court."""
+    """Splits a binary into blocks. The last one may be shorter."""
     for offset in range(0, len(data), block):
         yield data[offset:offset + block]
 
 
 def frame_count(fw_size: int, block: int = DATA_BLOCK_SIZE) -> int:
-    """Nombre de trames CMD_DATA necessaires pour un firmware donne."""
+    """Number of CMD_DATA frames needed for a given firmware."""
     return (fw_size + block - 1) // block
 
 
 if __name__ == "__main__":
-    print("Tailles des structures :")
-    print(f"  StartUpdate  : {struct.calcsize(StartUpdate.FORMAT):2} octets (attendu 16)")
-    print(f"  InfoResponse : {struct.calcsize(InfoResponse.FORMAT):2} octets (attendu 12)")
+    print("Structure sizes:")
+    print(f"  StartUpdate  : {struct.calcsize(StartUpdate.FORMAT):2} bytes (expected 16)")
+    print(f"  InfoResponse : {struct.calcsize(InfoResponse.FORMAT):2} bytes (expected 12)")
 
     f = Frame(cmd=CMD_DATA, seq=42, data=bytes(range(16)))
     raw = encode(f)
-    print(f"\nTrame encodee ({len(raw)} octets) :")
+    print(f"\nEncoded frame ({len(raw)} bytes):")
     print(f"  {raw.hex(' ')}")
-    print(f"\nRelue : {decode(raw)}")
+    print(f"\nDecoded: {decode(raw)}")

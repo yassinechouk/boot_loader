@@ -1,15 +1,14 @@
 """
-Interface de debug du protocole de mise a jour firmware.
+Debug interface for the firmware update protocol.
 
-Pilote le simulateur reel (bootloader_sim.BootloaderSim) : aucune
-logique de protocole n'est reimplementee ici. L'interface ne fait
-qu'observer et declencher. Si la machine a etats change, l'affichage
-suit automatiquement.
+Drives the real simulator (bootloader_sim.BootloaderSim): no protocol
+logic is reimplemented here. The interface only observes and triggers.
+If the state machine changes, the display follows automatically.
 
-Lancement :
+Launch:
     python3 debug_gui.py
 
-Aucune dependance externe : tkinter est fourni avec Python.
+No external dependencies: tkinter is bundled with Python.
 """
 
 import os
@@ -35,94 +34,94 @@ NACK      = "#ff5555"
 FRAME_C   = "#f1fa8c"
 ACCENT    = "#bd93f9"
 
-MONO = ("DejaVu Sans Mono", 9)
+MONO   = ("DejaVu Sans Mono", 9)
 MONO_B = ("DejaVu Sans Mono", 10, "bold")
-TITLE = ("DejaVu Sans", 11, "bold")
+TITLE  = ("DejaVu Sans", 11, "bold")
 
 
 class DebugGUI:
     def __init__(self, root):
         self.root = root
-        root.title("Bootloader — visualisation du protocole")
+        root.title("Bootloader — protocol visualisation")
         root.configure(bg=BG)
         root.geometry("1180x760")
 
         self.sim = BootloaderSim()
         self.firmware = os.urandom(1200)
-        self.etapes = []
+        self.steps = []
         self.index = 0
         self.auto = False
 
         self._build()
-        self._preparer_etapes()
+        self._prepare_steps()
         self._refresh()
 
     # -----------------------------------------------------------
-    # Construction de l'interface
+    # Interface construction
     # -----------------------------------------------------------
     def _build(self):
-        # --- barre de controle ---
-        barre = tk.Frame(self.root, bg=BG)
-        barre.pack(fill="x", padx=12, pady=(12, 6))
+        # --- control bar ---
+        bar = tk.Frame(self.root, bg=BG)
+        bar.pack(fill="x", padx=12, pady=(12, 6))
 
-        self.btn_step = tk.Button(barre, text="Etape suivante",
-                                  command=self.etape,
+        self.btn_step = tk.Button(bar, text="Next step",
+                                  command=self.step,
                                   bg=ACCENT, fg=BG, font=MONO_B,
                                   relief="flat", padx=14, pady=6)
         self.btn_step.pack(side="left")
 
-        self.btn_auto = tk.Button(barre, text="Lecture auto",
+        self.btn_auto = tk.Button(bar, text="Auto play",
                                   command=self.toggle_auto,
                                   bg=PANEL, fg=FG, font=MONO_B,
                                   relief="flat", padx=14, pady=6)
         self.btn_auto.pack(side="left", padx=6)
 
-        tk.Button(barre, text="Reinitialiser", command=self.reset,
+        tk.Button(bar, text="Reset", command=self.reset,
                   bg=PANEL, fg=FG, font=MONO_B,
                   relief="flat", padx=14, pady=6).pack(side="left")
 
-        tk.Button(barre, text="Charger un .bin", command=self.charger,
+        tk.Button(bar, text="Load .bin", command=self.load_file,
                   bg=PANEL, fg=FG, font=MONO_B,
                   relief="flat", padx=14, pady=6).pack(side="left", padx=6)
 
-        # injection de fautes
-        tk.Label(barre, text="   Injecter :", bg=BG, fg=DIM,
+        # fault injection
+        tk.Label(bar, text="   Inject:", bg=BG, fg=DIM,
                  font=MONO).pack(side="left")
 
-        self.corrompre = tk.BooleanVar()
-        tk.Checkbutton(barre, text="corruption CRC", variable=self.corrompre,
+        self.corrupt = tk.BooleanVar()
+        tk.Checkbutton(bar, text="CRC corruption", variable=self.corrupt,
                        bg=BG, fg=NACK, selectcolor=PANEL, font=MONO,
                        activebackground=BG, activeforeground=NACK).pack(side="left")
 
-        self.rejouer = tk.BooleanVar()
-        tk.Checkbutton(barre, text="retransmission", variable=self.rejouer,
+        self.replay = tk.BooleanVar()
+        tk.Checkbutton(bar, text="retransmission", variable=self.replay,
                        bg=BG, fg=FRAME_C, selectcolor=PANEL, font=MONO,
                        activebackground=BG, activeforeground=FRAME_C).pack(side="left")
 
-        self.progress = tk.Label(barre, text="", bg=BG, fg=DIM, font=MONO)
+        self.progress = tk.Label(bar, text="", bg=BG, fg=DIM, font=MONO)
         self.progress.pack(side="right")
 
-        # --- zone principale : PC | flux | bootloader ---
+        # --- main area: PC | flow | bootloader ---
         centre = tk.Frame(self.root, bg=BG)
         centre.pack(fill="both", expand=True, padx=12, pady=6)
 
-        self.pc_panel = self._panneau(centre, "PC  (outil de flash)", PC_COLOR)
+        self.pc_panel = self._panel(centre, "PC  (flash tool)", PC_COLOR)
         self.pc_panel.pack(side="left", fill="both", expand=True)
 
-        milieu = tk.Frame(centre, bg=BG, width=300)
-        milieu.pack(side="left", fill="both", padx=10)
-        milieu.pack_propagate(False)
+        middle = tk.Frame(centre, bg=BG, width=300)
+        middle.pack(side="left", fill="both", padx=10)
+        middle.pack_propagate(False)
 
-        self.canvas = tk.Canvas(milieu, bg=BG, height=110,
+        self.canvas = tk.Canvas(middle, bg=BG, height=110,
                                 highlightthickness=0)
         self.canvas.pack(fill="x", pady=(28, 6))
 
-        self.hex_box = tk.Text(milieu, bg=PANEL, fg=FRAME_C, font=MONO,
+        self.hex_box = tk.Text(middle, bg=PANEL, fg=FRAME_C, font=MONO,
                                height=14, relief="flat", wrap="word",
                                padx=8, pady=8)
         self.hex_box.pack(fill="both", expand=True)
 
-        self.bl_panel = self._panneau(centre, "STM32  (bootloader)", BL_COLOR)
+        self.bl_panel = self._panel(centre, "STM32  (bootloader)", BL_COLOR)
         self.bl_panel.pack(side="left", fill="both", expand=True)
 
         # --- flash ---
@@ -137,8 +136,8 @@ class DebugGUI:
                                       highlightbackground=BORDER)
         self.flash_canvas.pack(fill="x")
 
-        # --- journal ---
-        tk.Label(self.root, text="Journal", bg=BG, fg=DIM,
+        # --- log ---
+        tk.Label(self.root, text="Log", bg=BG, fg=DIM,
                  font=TITLE).pack(anchor="w", padx=12, pady=(6, 0))
 
         self.log = tk.Text(self.root, bg=PANEL, fg=FG, font=MONO,
@@ -149,56 +148,56 @@ class DebugGUI:
         self.log.tag_config("info", foreground=DIM)
         self.log.tag_config("pc", foreground=PC_COLOR)
 
-    def _panneau(self, parent, titre, couleur):
-        cadre = tk.Frame(parent, bg=PANEL, highlightthickness=1,
+    def _panel(self, parent, title, color):
+        frame = tk.Frame(parent, bg=PANEL, highlightthickness=1,
                          highlightbackground=BORDER)
-        tk.Label(cadre, text=titre, bg=PANEL, fg=couleur,
+        tk.Label(frame, text=title, bg=PANEL, fg=color,
                  font=TITLE).pack(anchor="w", padx=12, pady=(10, 4))
-        cadre.corps = tk.Text(cadre, bg=PANEL, fg=FG, font=MONO,
-                              relief="flat", padx=12, pady=4, wrap="word")
-        cadre.corps.pack(fill="both", expand=True)
-        cadre.corps.tag_config("cle", foreground=DIM)
-        cadre.corps.tag_config("val", foreground=FG)
-        cadre.corps.tag_config("hi", foreground=ACCENT)
-        return cadre
+        frame.body = tk.Text(frame, bg=PANEL, fg=FG, font=MONO,
+                             relief="flat", padx=12, pady=4, wrap="word")
+        frame.body.pack(fill="both", expand=True)
+        frame.body.tag_config("key", foreground=DIM)
+        frame.body.tag_config("val", foreground=FG)
+        frame.body.tag_config("hi", foreground=ACCENT)
+        return frame
 
     # -----------------------------------------------------------
     # Scenario
     # -----------------------------------------------------------
-    def _preparer_etapes(self):
-        """Construit la liste des trames que le PC va emettre."""
-        self.etapes = [("GET_INFO", p.Frame(p.CMD_GET_INFO, 0))]
+    def _prepare_steps(self):
+        """Builds the list of frames the PC will send."""
+        self.steps = [("GET_INFO", p.Frame(p.CMD_GET_INFO, 0))]
         self.fw_crc = crc32_stm32(self.firmware)
-        self.blocs = list(p.split_firmware(self.firmware))
-        # START_UPDATE et les DATA sont construits a la volee :
-        # le slot cible depend de la reponse a GET_INFO.
+        self.blocks = list(p.split_firmware(self.firmware))
+        # START_UPDATE and DATA frames are built on the fly:
+        # the target slot depends on the GET_INFO response.
         self.phase = "info"
         self.seq = 0
-        self.bloc_index = 0
-        self.derniere_trame = None
-        self.derniere_reponse = None
-        self.cible = None
+        self.block_index = 0
+        self.last_frame = None
+        self.last_response = None
+        self.target = None
 
-    def _trame_suivante(self):
-        """Retourne la prochaine trame a emettre, ou None si termine."""
+    def _next_frame(self):
+        """Returns the next frame to send, or None if done."""
         if self.phase == "info":
             return p.Frame(p.CMD_GET_INFO, 0)
 
         if self.phase == "start":
             su = p.StartUpdate(len(self.firmware), self.fw_crc,
-                               0x00010000, self.cible)
+                               0x00010000, self.target)
             return p.Frame(p.CMD_START_UPDATE, 0, su.pack())
 
         if self.phase == "data":
-            if self.bloc_index >= len(self.blocs):
+            if self.block_index >= len(self.blocks):
                 return None
-            # Retransmission volontaire : on renvoie la trame precedente
-            if self.rejouer.get() and self.bloc_index > 0:
-                self.rejouer.set(False)
+            # Intentional retransmission: resend the previous frame
+            if self.replay.get() and self.block_index > 0:
+                self.replay.set(False)
                 return p.Frame(p.CMD_DATA, self.seq,
-                               self.blocs[self.bloc_index - 1])
+                               self.blocks[self.block_index - 1])
             return p.Frame(p.CMD_DATA, self.seq + 1,
-                           self.blocs[self.bloc_index])
+                           self.blocks[self.block_index])
 
         if self.phase == "end":
             return p.Frame(p.CMD_END_UPDATE, self.seq + 1)
@@ -206,68 +205,68 @@ class DebugGUI:
         return None
 
     # -----------------------------------------------------------
-    # Execution d'une etape
+    # Step execution
     # -----------------------------------------------------------
-    def etape(self):
-        trame = self._trame_suivante()
-        if trame is None:
-            self._journal("Transfert termine.", "info")
-            self._journal(f"Au redemarrage : {self.sim.boot()}", "info")
+    def step(self):
+        frame = self._next_frame()
+        if frame is None:
+            self._log("Transfer complete.", "info")
+            self._log(f"At next boot: {self.sim.boot()}", "info")
             self.auto = False
-            self.btn_auto.config(text="Lecture auto")
+            self.btn_auto.config(text="Auto play")
             return
 
-        octets = bytearray(p.encode(trame))
+        raw = bytearray(p.encode(frame))
 
-        # Injection de faute : on inverse un octet du payload
-        corrompue = False
-        if self.corrompre.get() and len(octets) > p.FRAME_HEADER_SIZE + 2:
-            octets[p.FRAME_HEADER_SIZE + 1] ^= 0xFF
-            corrompue = True
-            self.corrompre.set(False)
+        # Fault injection: flip one payload byte
+        corrupted = False
+        if self.corrupt.get() and len(raw) > p.FRAME_HEADER_SIZE + 2:
+            raw[p.FRAME_HEADER_SIZE + 1] ^= 0xFF
+            corrupted = True
+            self.corrupt.set(False)
 
-        self.derniere_trame = trame
-        self._journal(f"PC  -> {trame}"
-                      + ("   [octet corrompu injecte]" if corrompue else ""),
-                      "pc")
+        self.last_frame = frame
+        self._log(f"PC  -> {frame}"
+                  + ("   [corrupted byte injected]" if corrupted else ""),
+                  "pc")
 
         try:
-            brut = self.sim.handle(bytes(octets))
+            response_bytes = self.sim.handle(bytes(raw))
         except PowerLoss as e:
-            self._journal(f"COUPURE : {e}", "nack")
+            self._log(f"POWER CUT: {e}", "nack")
             self._refresh()
             return
 
-        if not brut:
-            self._journal("BL  -> (aucune reponse, trame ignoree)", "info")
-            self.derniere_reponse = None
+        if not response_bytes:
+            self._log("BL  -> (no response, frame ignored)", "info")
+            self.last_response = None
             self._refresh()
             return
 
-        reponse = p.decode(brut)
-        self.derniere_reponse = reponse
+        response = p.decode(response_bytes)
+        self.last_response = response
 
-        if reponse.cmd == p.RSP_NACK:
-            err = p.ERROR_NAMES.get(reponse.data[0], reponse.data[0])
-            self._journal(f"BL  -> NACK  {err}", "nack")
+        if response.cmd == p.RSP_NACK:
+            err = p.ERROR_NAMES.get(response.data[0], response.data[0])
+            self._log(f"BL  -> NACK  {err}", "nack")
         else:
-            nom = p.CMD_NAMES.get(reponse.cmd, hex(reponse.cmd))
-            self._journal(f"BL  -> {nom}  seq={reponse.seq}", "ack")
+            name = p.CMD_NAMES.get(response.cmd, hex(response.cmd))
+            self._log(f"BL  -> {name}  seq={response.seq}", "ack")
 
-        self._avancer(reponse, corrompue)
+        self._advance(response, corrupted)
         self._refresh()
 
-    def _avancer(self, reponse, corrompue):
-        """Fait progresser la machine a etats du PC."""
-        if reponse.cmd == p.RSP_NACK:
-            return      # on reste sur place, le PC retransmettra
+    def _advance(self, response, corrupted):
+        """Advances the PC state machine."""
+        if response.cmd == p.RSP_NACK:
+            return      # stay in place, PC will retransmit
 
         if self.phase == "info":
-            info = p.InfoResponse.unpack(reponse.data)
-            self.cible = info.free_slot
-            self._journal(
-                f"    slot libre = {'AB'[self.cible]}, "
-                f"envoi de app_slot{'AB'[self.cible]}.bin", "info")
+            info = p.InfoResponse.unpack(response.data)
+            self.target = info.free_slot
+            self._log(
+                f"    free slot = {'AB'[self.target]}, "
+                f"sending app_slot{'AB'[self.target]}.bin", "info")
             self.phase = "start"
 
         elif self.phase == "start":
@@ -275,147 +274,147 @@ class DebugGUI:
             self.phase = "data"
 
         elif self.phase == "data":
-            if not corrompue:
-                self.seq = reponse.seq
-                # une retransmission ne fait pas avancer l'index
-                if reponse.seq > self.bloc_index:
-                    self.bloc_index += 1
-            if self.bloc_index >= len(self.blocs):
+            if not corrupted:
+                self.seq = response.seq
+                # a retransmission does not advance the index
+                if response.seq > self.block_index:
+                    self.block_index += 1
+            if self.block_index >= len(self.blocks):
                 self.phase = "end"
 
         elif self.phase == "end":
-            self.phase = "fini"
+            self.phase = "done"
 
     # -----------------------------------------------------------
-    # Rafraichissement de l'affichage
+    # Display refresh
     # -----------------------------------------------------------
     def _refresh(self):
-        self._maj_pc()
-        self._maj_bl()
-        self._maj_flux()
-        self._maj_flash()
+        self._update_pc()
+        self._update_bl()
+        self._update_flow()
+        self._update_flash()
 
-        total = len(self.blocs)
+        total = len(self.blocks)
         self.progress.config(
-            text=f"bloc {min(self.bloc_index, total)}/{total}   "
-                 f"phase : {self.phase}")
+            text=f"block {min(self.block_index, total)}/{total}   "
+                 f"phase: {self.phase}")
 
-    def _ligne(self, widget, cle, val, tag="val"):
-        widget.insert("end", f"{cle:<18}", "cle")
+    def _line(self, widget, key, val, tag="val"):
+        widget.insert("end", f"{key:<18}", "key")
         widget.insert("end", f"{val}\n", tag)
 
-    def _maj_pc(self):
-        t = self.pc_panel.corps
+    def _update_pc(self):
+        t = self.pc_panel.body
         t.config(state="normal")
         t.delete("1.0", "end")
 
-        self._ligne(t, "firmware", f"{len(self.firmware)} octets")
-        self._ligne(t, "CRC global", f"0x{self.fw_crc:08X}")
-        self._ligne(t, "blocs", f"{len(self.blocs)} x {p.DATA_BLOCK_SIZE}")
+        self._line(t, "firmware", f"{len(self.firmware)} bytes")
+        self._line(t, "global CRC", f"0x{self.fw_crc:08X}")
+        self._line(t, "blocks", f"{len(self.blocks)} x {p.DATA_BLOCK_SIZE}")
         t.insert("end", "\n")
-        self._ligne(t, "phase", self.phase, "hi")
-        self._ligne(t, "prochain seq", self.seq + 1)
-        self._ligne(t, "bloc courant", f"{self.bloc_index}/{len(self.blocs)}")
-        if self.cible is not None:
-            self._ligne(t, "slot cible", "AB"[self.cible], "hi")
+        self._line(t, "phase", self.phase, "hi")
+        self._line(t, "next seq", self.seq + 1)
+        self._line(t, "current block", f"{self.block_index}/{len(self.blocks)}")
+        if self.target is not None:
+            self._line(t, "target slot", "AB"[self.target], "hi")
 
         t.insert("end", "\n")
-        restants = len(self.blocs) - self.bloc_index
-        octets_restants = restants * p.DATA_BLOCK_SIZE
-        duree = octets_restants * 10 / 115200
-        self._ligne(t, "reste a envoyer", f"{octets_restants} octets")
-        self._ligne(t, "duree estimee", f"{duree:.2f} s @115200")
+        remaining = len(self.blocks) - self.block_index
+        remaining_bytes = remaining * p.DATA_BLOCK_SIZE
+        duration = remaining_bytes * 10 / 115200
+        self._line(t, "remaining", f"{remaining_bytes} bytes")
+        self._line(t, "estimated time", f"{duration:.2f} s @115200")
 
         t.config(state="disabled")
 
-    def _maj_bl(self):
-        t = self.bl_panel.corps
+    def _update_bl(self):
+        t = self.bl_panel.body
         t.config(state="normal")
         t.delete("1.0", "end")
 
-        self._ligne(t, "etat interne", self.sim.state, "hi")
-        self._ligne(t, "seq attendu", self.sim.expected_seq)
-        self._ligne(t, "dernier seq", self.sim.last_seq)
+        self._line(t, "internal state", self.sim.state, "hi")
+        self._line(t, "expected seq", self.sim.expected_seq)
+        self._line(t, "last seq", self.sim.last_seq)
         if self.sim.target_slot is not None:
-            self._ligne(t, "slot en ecriture", "AB"[self.sim.target_slot])
-        self._ligne(t, "octets recus", self.sim.bytes_received)
+            self._line(t, "slot being written", "AB"[self.sim.target_slot])
+        self._line(t, "bytes received", self.sim.bytes_received)
 
-        t.insert("end", "\nMetadonnees\n", "cle")
+        t.insert("end", "\nMetadata\n", "key")
         meta = self.sim.read_metadata()
         if meta is None:
-            t.insert("end", "  aucune copie valide\n", "val")
+            t.insert("end", "  no valid copy\n", "val")
         else:
-            self._ligne(t, "  compteur", meta.counter)
-            self._ligne(t, "  slot actif", "AB"[meta.active_slot], "hi")
-            self._ligne(t, "  etat",
-                        p.STATE_NAMES.get(meta.state, meta.state), "hi")
-            self._ligne(t, "  taille", meta.fw_size)
-            self._ligne(t, "  echecs boot", meta.boot_fail_count)
+            self._line(t, "  counter", meta.counter)
+            self._line(t, "  active slot", "AB"[meta.active_slot], "hi")
+            self._line(t, "  state",
+                       p.STATE_NAMES.get(meta.state, meta.state), "hi")
+            self._line(t, "  size", meta.fw_size)
+            self._line(t, "  boot failures", meta.boot_fail_count)
 
-        t.insert("end", "\nPages de metadonnees\n", "cle")
+        t.insert("end", "\nMetadata pages\n", "key")
         for pg in (0, 1):
             from bootloader_sim import Metadata
             m = Metadata.unpack(self.sim.flash.read_meta_page(pg))
             if m is None:
-                etat = "vierge ou invalide"
+                status = "blank or invalid"
             else:
-                etat = f"counter={m.counter}"
+                status = f"counter={m.counter}"
                 if meta and m.counter == meta.counter:
-                    etat += "   <- fait foi"
-            self._ligne(t, f"  page {pg}", etat)
+                    status += "   <- authoritative"
+            self._line(t, f"  page {pg}", status)
 
         t.config(state="disabled")
 
-    def _maj_flux(self):
+    def _update_flow(self):
         c = self.canvas
         c.delete("all")
         w = c.winfo_width() or 280
 
-        # fleche descendante PC -> BL
+        # downward arrow PC -> BL
         c.create_line(20, 20, w - 20, 20, fill=DIM, width=2,
                       arrow="last", arrowshape=(12, 14, 5))
-        if self.derniere_trame:
-            nom = p.CMD_NAMES.get(self.derniere_trame.cmd, "?")
-            c.create_text(w / 2, 8, text=nom, fill=PC_COLOR, font=MONO)
+        if self.last_frame:
+            name = p.CMD_NAMES.get(self.last_frame.cmd, "?")
+            c.create_text(w / 2, 8, text=name, fill=PC_COLOR, font=MONO)
 
-        # fleche remontante BL -> PC
+        # upward arrow BL -> PC
         c.create_line(w - 20, 70, 20, 70, fill=DIM, width=2,
                       arrow="last", arrowshape=(12, 14, 5))
-        if self.derniere_reponse:
-            nom = p.CMD_NAMES.get(self.derniere_reponse.cmd, "?")
-            coul = NACK if self.derniere_reponse.cmd == p.RSP_NACK else ACK
-            c.create_text(w / 2, 58, text=nom, fill=coul, font=MONO)
+        if self.last_response:
+            name = p.CMD_NAMES.get(self.last_response.cmd, "?")
+            color = NACK if self.last_response.cmd == p.RSP_NACK else ACK
+            c.create_text(w / 2, 58, text=name, fill=color, font=MONO)
 
-        # dump hexadecimal de la derniere trame emise
+        # hex dump of the last frame sent
         self.hex_box.config(state="normal")
         self.hex_box.delete("1.0", "end")
-        if self.derniere_trame:
-            brut = p.encode(self.derniere_trame)
-            self.hex_box.insert("end", "Trame emise\n\n")
-            self.hex_box.insert("end", f"MAGIC   {brut[0:2].hex(' ')}\n")
-            self.hex_box.insert("end", f"CMD     {brut[2]:02x}\n")
-            self.hex_box.insert("end", f"LENGTH  {brut[3:5].hex(' ')}"
-                                       f"   ({len(self.derniere_trame.data)})\n")
-            self.hex_box.insert("end", f"SEQ     {brut[5:7].hex(' ')}"
-                                       f"   ({self.derniere_trame.seq})\n")
-            corps = brut[7:len(brut) - 4]
-            apercu = corps[:24].hex(' ')
-            suite = " ..." if len(corps) > 24 else ""
-            self.hex_box.insert("end", f"DATA    {apercu}{suite}\n")
-            self.hex_box.insert("end", f"CRC32   {brut[-4:].hex(' ')}\n")
-            self.hex_box.insert("end", f"\ntotal   {len(brut)} octets")
+        if self.last_frame:
+            raw = p.encode(self.last_frame)
+            self.hex_box.insert("end", "Sent frame\n\n")
+            self.hex_box.insert("end", f"MAGIC   {raw[0:2].hex(' ')}\n")
+            self.hex_box.insert("end", f"CMD     {raw[2]:02x}\n")
+            self.hex_box.insert("end", f"LENGTH  {raw[3:5].hex(' ')}"
+                                       f"   ({len(self.last_frame.data)})\n")
+            self.hex_box.insert("end", f"SEQ     {raw[5:7].hex(' ')}"
+                                       f"   ({self.last_frame.seq})\n")
+            body = raw[7:len(raw) - 4]
+            preview = body[:24].hex(' ')
+            suffix = " ..." if len(body) > 24 else ""
+            self.hex_box.insert("end", f"DATA    {preview}{suffix}\n")
+            self.hex_box.insert("end", f"CRC32   {raw[-4:].hex(' ')}\n")
+            self.hex_box.insert("end", f"\ntotal   {len(raw)} bytes")
         self.hex_box.config(state="disabled")
 
-    def _maj_flash(self):
+    def _update_flash(self):
         c = self.flash_canvas
         c.delete("all")
         w = c.winfo_width() or 1100
         if w < 100:
-            self.root.after(50, self._maj_flash)
+            self.root.after(50, self._update_flash)
             return
 
         meta = self.sim.read_metadata()
-        actif = meta.active_slot if meta else None
+        active = meta.active_slot if meta else None
 
         for i, slot in enumerate((p.SLOT_A, p.SLOT_B)):
             y = 8 + i * 32
@@ -423,74 +422,74 @@ class DebugGUI:
                           fill=DIM, font=MONO)
 
             x0, x1 = 70, w - 90
-            largeur = x1 - x0
+            width = x1 - x0
             c.create_rectangle(x0, y, x1, y + 20,
                                fill=BG, outline=BORDER)
 
-            # proportion ecrite : on echantillonne pour rester rapide
-            donnees = self.sim.flash.slots[slot]
-            taille_utile = max(len(self.firmware), 1)
-            ecrits = sum(1 for k in range(0, taille_utile, 64)
-                         if donnees[k] != 0xFF)
-            total_ech = max(1, len(range(0, taille_utile, 64)))
-            frac = ecrits / total_ech
+            # written proportion: sampled to stay fast
+            data = self.sim.flash.slots[slot]
+            useful = max(len(self.firmware), 1)
+            written = sum(1 for k in range(0, useful, 64)
+                          if data[k] != 0xFF)
+            total_samples = max(1, len(range(0, useful, 64)))
+            frac = written / total_samples
 
             if frac > 0:
-                coul = BL_COLOR if slot == actif else ACCENT
-                c.create_rectangle(x0, y, x0 + largeur * frac, y + 20,
-                                   fill=coul, outline="")
+                color = BL_COLOR if slot == active else ACCENT
+                c.create_rectangle(x0, y, x0 + width * frac, y + 20,
+                                   fill=color, outline="")
 
-            etiquette = f"{frac * 100:.0f}%"
-            if slot == actif:
-                etiquette += "  actif"
-            c.create_text(x1 + 42, y + 10, text=etiquette,
+            label = f"{frac * 100:.0f}%"
+            if slot == active:
+                label += "  active"
+            c.create_text(x1 + 42, y + 10, text=label,
                           fill=FG, font=MONO)
 
     # -----------------------------------------------------------
-    # Commandes
+    # Commands
     # -----------------------------------------------------------
     def toggle_auto(self):
         self.auto = not self.auto
-        self.btn_auto.config(text="Pause" if self.auto else "Lecture auto")
+        self.btn_auto.config(text="Pause" if self.auto else "Auto play")
         if self.auto:
-            self._boucle()
+            self._loop()
 
-    def _boucle(self):
+    def _loop(self):
         if not self.auto:
             return
-        self.etape()
-        if self.phase != "fini":
-            self.root.after(220, self._boucle)
+        self.step()
+        if self.phase != "done":
+            self.root.after(220, self._loop)
         else:
             self.auto = False
-            self.btn_auto.config(text="Lecture auto")
+            self.btn_auto.config(text="Auto play")
 
     def reset(self):
         self.sim = BootloaderSim()
-        self._preparer_etapes()
+        self._prepare_steps()
         self.log.delete("1.0", "end")
-        self._journal("Simulateur reinitialise.", "info")
+        self._log("Simulator reset.", "info")
         self._refresh()
 
-    def charger(self):
-        chemin = filedialog.askopenfilename(
-            title="Choisir un firmware",
-            filetypes=[("Binaire", "*.bin"), ("Tous", "*.*")])
-        if not chemin:
+    def load_file(self):
+        path = filedialog.askopenfilename(
+            title="Choose a firmware",
+            filetypes=[("Binary", "*.bin"), ("All", "*.*")])
+        if not path:
             return
-        with open(chemin, "rb") as f:
+        with open(path, "rb") as f:
             self.firmware = f.read()
         self.reset()
-        self._journal(f"Charge : {os.path.basename(chemin)} "
-                      f"({len(self.firmware)} octets)", "info")
+        self._log(f"Loaded: {os.path.basename(path)} "
+                  f"({len(self.firmware)} bytes)", "info")
 
-    def _journal(self, texte, tag="info"):
-        self.log.insert("end", texte + "\n", tag)
+    def _log(self, text, tag="info"):
+        self.log.insert("end", text + "\n", tag)
         self.log.see("end")
 
 
 if __name__ == "__main__":
     root = tk.Tk()
     app = DebugGUI(root)
-    root.after(120, app._refresh)     # une fois les tailles connues
+    root.after(120, app._refresh)     # once widget sizes are known
     root.mainloop()

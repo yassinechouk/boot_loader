@@ -8,26 +8,26 @@
 #include "uart.h"
 
 /* ----------------------------------------------------------------
- * Assemblage des trames
+ * Frame assembly
  *
- * Les octets arrivent un par un, sans garantie de decoupage. Un
- * automate les accumule jusqu'a disposer d'une trame complete.
+ * Bytes arrive one at a time with no guaranteed framing. A state
+ * machine accumulates them until a complete frame is available.
  * ---------------------------------------------------------------- */
 typedef enum {
     RX_MAGIC0 = 0,
     RX_MAGIC1,
-    RX_HEADER,      /* CMD, LENGTH, SEQ : 5 octets */
+    RX_HEADER,      /* CMD, LENGTH, SEQ: 5 bytes */
     RX_DATA,
-    RX_CRC          /* 4 octets */
+    RX_CRC          /* 4 bytes */
 } rx_state_t;
 
 static rx_state_t rx_state;
 static uint8_t    rx_frame[FRAME_HEADER_SIZE + MAX_PAYLOAD_SIZE + FRAME_CRC_SIZE];
-static uint32_t   rx_index;      /* position dans rx_frame        */
-static uint32_t   rx_expected;   /* octets restants pour l'etat   */
+static uint32_t   rx_index;      /* position in rx_frame          */
+static uint32_t   rx_expected;   /* bytes remaining for this state */
 
 /* ----------------------------------------------------------------
- * Contexte de transfert
+ * Transfer context
  * ---------------------------------------------------------------- */
 static protocol_state_t state;
 
@@ -47,7 +47,7 @@ static uint32_t cnt_frames_ko;
 
 
 /* ----------------------------------------------------------------
- * Emission d'une trame
+ * Frame transmission
  * ---------------------------------------------------------------- */
 
 static void send_frame(uint8_t cmd, uint16_t seq,
@@ -63,8 +63,8 @@ static void send_frame(uint8_t cmd, uint16_t seq,
     header[5] = (uint8_t)(seq & 0xFFU);
     header[6] = (uint8_t)((seq >> 8) & 0xFFU);
 
-    /* Le CRC couvre CMD, LENGTH, SEQ et DATA — pas le MAGIC, qui se
-       valide de lui-meme par sa seule reconnaissance. */
+    /* The CRC covers CMD, LENGTH, SEQ and DATA — not the MAGIC, which
+       validates itself simply by being recognized. */
     crc32_reset();
     crc32_update(&header[FRAME_OFF_CMD], FRAME_HEADER_SIZE - FRAME_OFF_CMD);
     if (len > 0U && data != 0) {
@@ -99,7 +99,7 @@ static void send_nack(uint16_t seq, uint8_t err)
 
 
 /* ----------------------------------------------------------------
- * Abandon du transfert
+ * Transfer abort
  * ---------------------------------------------------------------- */
 
 static void abort_transfer(void)
@@ -112,7 +112,7 @@ static void abort_transfer(void)
 
 
 /* ----------------------------------------------------------------
- * Traitement des commandes
+ * Command handlers
  * ---------------------------------------------------------------- */
 
 static void on_get_info(uint16_t seq)
@@ -128,9 +128,9 @@ static void on_get_info(uint16_t seq)
         ver    = meta.slot[active].version;
     }
 
-    /* La reponse est construite octet par octet plutot que par un
-       cast de struct : elle traverse une liaison serie, donc son
-       agencement doit etre explicite et independant du compilateur. */
+    /* The response is built byte by byte rather than by casting a
+       struct: it crosses a serial link, so its layout must be
+       explicit and compiler-independent. */
     uint8_t payload[12];
 
     payload[0]  = (uint8_t)(ver & 0xFFU);
@@ -145,7 +145,7 @@ static void on_get_info(uint16_t seq)
 
     payload[8]  = (uint8_t)PROTO_VERSION;
     payload[9]  = active;
-    payload[10] = (uint8_t)(1U - active);    /* slot libre */
+    payload[10] = (uint8_t)(1U - active);    /* free slot */
     payload[11] = st;
 
     send_frame(RSP_INFO, seq, payload, 12);
@@ -184,50 +184,50 @@ static void on_start_update(uint16_t seq, const uint8_t *data, uint16_t len)
 
     metadata_t meta;
     uint8_t active = metadata_read(&meta) ? meta.active_slot : SLOT_A;
-    uint8_t libre  = (uint8_t)(1U - active);
+    uint8_t free   = (uint8_t)(1U - active);
 
-    /* Toutes les verifications possibles ont lieu AVANT le moindre
-       effacement. Un refus ne doit rien detruire. */
+    /* All checks happen BEFORE any erase. A rejection must not
+       destroy anything. */
     if (size == 0U || size > SLOT_SIZE) {
         send_nack(seq, ERR_SIZE);
         return;
     }
-    if (slot != libre) {
+    if (slot != free) {
         send_nack(seq, ERR_SLOT);
         return;
     }
 
-    /* Ordonnancement fail-safe : marquer IN_PROGRESS avant toute
-       operation destructive. L'ordre inverse laisserait une fenetre
-       pendant laquelle les metadonnees affirmeraient qu'un firmware
-       valide existe alors qu'il vient d'etre efface. */
-    metadata_t nouvelle;
-    uint8_t *raw = (uint8_t *)&nouvelle;
-    for (unsigned i = 0; i < sizeof(nouvelle); i++) {
+    /* Fail-safe ordering: mark IN_PROGRESS before any destructive
+       operation. The reverse order would leave a window during which
+       metadata claims a valid firmware exists while it has just been
+       erased. */
+    metadata_t updated;
+    uint8_t *raw = (uint8_t *)&updated;
+    for (unsigned i = 0; i < sizeof(updated); i++) {
         raw[i] = 0;
     }
-    /* On repart de l'etat courant : les informations de l'AUTRE slot
-       doivent survivre, faute de quoi un rollback ulterieur ne
-       saurait plus decrire l'image de repli. */
-    metadata_t courant;
-    if (metadata_read(&courant)) {
-        nouvelle = courant;
+    /* Preserve the current state: the OTHER slot's information must
+       survive, otherwise a later rollback would no longer be able to
+       describe the fallback image. */
+    metadata_t current;
+    if (metadata_read(&current)) {
+        updated = current;
     }
-    nouvelle.active_slot        = active;   /* inchange tant que non valide */
-    nouvelle.boot_fail_count    = 0;
-    nouvelle.slot[slot].size    = size;
-    nouvelle.slot[slot].crc32   = crc;
-    nouvelle.slot[slot].version = ver;
-    nouvelle.slot[slot].state   = STATE_IN_PROGRESS;
+    updated.active_slot        = active;   /* unchanged until validated */
+    updated.boot_fail_count    = 0;
+    updated.slot[slot].size    = size;
+    updated.slot[slot].crc32   = crc;
+    updated.slot[slot].version = ver;
+    updated.slot[slot].state   = STATE_IN_PROGRESS;
 
-    if (metadata_write(&nouvelle) != META_OK) {
+    if (metadata_write(&updated) != META_OK) {
         send_nack(seq, ERR_FLASH);
         return;
     }
 
-    /* Le slot n'est pas efface ici : chaque page le sera juste avant
-       d'etre ecrite. Effacer 480 Ko d'avance couterait pres de cinq
-       secondes pour un firmware qui n'en occupera peut-etre que 20. */
+    /* The slot is not erased here: each page will be erased just
+       before being written. Erasing 480 KB upfront would cost nearly
+       five seconds for a firmware that may only occupy 20 KB. */
 
     target_slot   = slot;
     fw_size       = size;
@@ -250,10 +250,10 @@ static void on_data(uint16_t seq, const uint8_t *data, uint16_t len)
         return;
     }
 
-    /* Retransmission : le PC n'a pas recu l'accuse precedent. Il
-       n'attend pas une reecriture — la flash ne se reprogramme pas
-       sans effacement — mais l'accuse manquant. Retraiter la trame
-       doit rester sans effet de bord. */
+    /* Retransmission: the PC did not receive the previous ACK. It
+       does not expect a re-write — flash cannot be reprogrammed
+       without erasing — but the missing acknowledgement. Reprocessing
+       the frame must have no side effect. */
     if (seq == last_seq) {
         send_ack(seq);
         return;
@@ -266,8 +266,8 @@ static void on_data(uint16_t seq, const uint8_t *data, uint16_t len)
     }
 
     if (len == 0U || (len % 8U) != 0U) {
-        /* La flash ne programme que par double-mot. Une longueur non
-           multiple de 8 ne peut pas etre ecrite telle quelle. */
+        /* Flash only programs in double-words. A length that is not
+           a multiple of 8 cannot be written as-is. */
         send_nack(seq, ERR_LENGTH);
         return;
     }
@@ -282,9 +282,9 @@ static void on_data(uint16_t seq, const uint8_t *data, uint16_t len)
 
     uint32_t addr = SLOT_ADDR(target_slot) + offset;
 
-    /* Effacement paresseux. La taille de bloc divisant celle d'une
-       page, une frontiere de page tombe toujours sur une frontiere
-       de bloc : aucun bloc n'est jamais a cheval sur deux pages. */
+    /* Lazy erase. The block size divides the page size exactly, so a
+       page boundary always coincides with a block boundary: no block
+       ever straddles two pages. */
     if ((offset % FLASH_PAGE_SIZE) == 0U) {
         if (flash_erase_page(addr) != FLASH_OK) {
             send_nack(seq, ERR_FLASH);
@@ -320,33 +320,32 @@ static void on_end_update(uint16_t seq)
         return;
     }
 
-    /* Verification globale par RELECTURE de la flash.
+    /* Global verification by re-reading flash.
      *
-     * Le CRC de trame validait l'acheminement ; celui-ci valide le
-     * stockage. Il detecte ce que le premier ne peut pas voir : une
-     * cellule defaillante, une ecriture partielle, une erreur
-     * d'adressage. */
+     * The per-frame CRC validated delivery; this one validates storage.
+     * It detects what the former cannot: a defective cell, a partial
+     * write, an addressing error. */
     const uint8_t *stored = (const uint8_t *)SLOT_ADDR(target_slot);
-    uint32_t calcule = crc32_compute(stored, fw_size);
+    uint32_t computed = crc32_compute(stored, fw_size);
 
-    if (calcule != fw_crc32) {
+    if (computed != fw_crc32) {
         send_nack(seq, ERR_GLOBAL_CRC);
         abort_transfer();
         return;
     }
 
-    /* STATE_TESTING et non STATE_VALID : un CRC correct prouve
-       l'integrite de l'image, pas son bon fonctionnement. Un firmware
-       transmis sans la moindre corruption peut planter des sa
-       premiere seconde. L'application devra se confirmer elle-meme. */
+    /* STATE_TESTING, not STATE_VALID: a correct CRC proves the
+       integrity of the image, not that it works correctly. A firmware
+       transferred without any corruption can crash within its first
+       second. The application must confirm itself. */
     metadata_t meta;
     uint8_t *raw = (uint8_t *)&meta;
     for (unsigned i = 0; i < sizeof(meta); i++) {
         raw[i] = 0;
     }
-    metadata_t courant2;
-    if (metadata_read(&courant2)) {
-        meta = courant2;
+    metadata_t current2;
+    if (metadata_read(&current2)) {
+        meta = current2;
     }
     meta.active_slot                  = target_slot;
     meta.boot_fail_count              = 0;
@@ -398,7 +397,7 @@ static void dispatch(uint8_t cmd, uint16_t seq,
 
 
 /* ----------------------------------------------------------------
- * Assemblage des octets recus
+ * Byte assembly
  * ---------------------------------------------------------------- */
 
 static void rx_reset(void)
@@ -418,8 +417,8 @@ static void feed(uint8_t byte)
             rx_frame[0] = byte;
             rx_state = RX_MAGIC1;
         }
-        /* Tout autre octet est ignore : on cherche un debut de trame
-           dans un flux potentiellement bruite. */
+        /* Any other byte is ignored: looking for a frame start
+           in a potentially noisy stream. */
         break;
 
     case RX_MAGIC1:
@@ -429,8 +428,8 @@ static void feed(uint8_t byte)
             rx_expected = FRAME_HEADER_SIZE - 2U;
             rx_state    = RX_HEADER;
         } else if (byte == FRAME_MAGIC_0) {
-            /* Sequence 0xAA 0xAA 0x55 : le second 0xAA peut etre le
-               vrai debut. On reste en attente du 0x55. */
+            /* Sequence 0xAA 0xAA 0x55: the second 0xAA may be the
+               real start. Stay waiting for 0x55. */
             rx_frame[0] = byte;
         } else {
             rx_state = RX_MAGIC0;
@@ -443,10 +442,10 @@ static void feed(uint8_t byte)
             uint16_t len = (uint16_t)rx_frame[FRAME_OFF_LENGTH]
                          | (uint16_t)((uint16_t)rx_frame[FRAME_OFF_LENGTH + 1] << 8);
 
-            /* Verification de plausibilite AVANT toute bufferisation.
-               Un champ de longueur non borne est un vecteur classique
-               de debordement de tampon : attendre 60000 octets
-               depasserait la capacite du tampon de trame. */
+            /* Plausibility check BEFORE any buffering. An unbounded
+               length field is a classic buffer-overflow vector:
+               waiting for 60000 bytes would exceed the frame buffer
+               capacity. */
             if (len > MAX_PAYLOAD_SIZE) {
                 cnt_frames_ko++;
                 rx_reset();
@@ -479,15 +478,15 @@ static void feed(uint8_t byte)
 
             uint32_t off = FRAME_HEADER_SIZE + len;
 
-            uint32_t recu = (uint32_t)rx_frame[off]
-                          | ((uint32_t)rx_frame[off + 1] << 8)
-                          | ((uint32_t)rx_frame[off + 2] << 16)
-                          | ((uint32_t)rx_frame[off + 3] << 24);
+            uint32_t received = (uint32_t)rx_frame[off]
+                              | ((uint32_t)rx_frame[off + 1] << 8)
+                              | ((uint32_t)rx_frame[off + 2] << 16)
+                              | ((uint32_t)rx_frame[off + 3] << 24);
 
-            uint32_t calcule = crc32_compute(&rx_frame[FRAME_OFF_CMD],
+            uint32_t computed = crc32_compute(&rx_frame[FRAME_OFF_CMD],
                                              (FRAME_HEADER_SIZE - FRAME_OFF_CMD) + len);
 
-            if (calcule == recu) {
+            if (computed == received) {
                 uint8_t  cmd = rx_frame[FRAME_OFF_CMD];
                 uint16_t seq = (uint16_t)rx_frame[FRAME_OFF_SEQ]
                              | (uint16_t)((uint16_t)rx_frame[FRAME_OFF_SEQ + 1] << 8);
@@ -512,7 +511,7 @@ static void feed(uint8_t byte)
 
 
 /* ----------------------------------------------------------------
- * Interface publique
+ * Public interface
  * ---------------------------------------------------------------- */
 
 void protocol_init(void)
@@ -539,28 +538,26 @@ void protocol_init(void)
 void protocol_poll(uint32_t now_ms)
 {
     uint8_t byte;
-    int recu = 0;
+    int received = 0;
 
     while (uart_getc(&byte)) {
         feed(byte);
-        recu = 1;
+        received = 1;
     }
 
-    /* Le compteur d'inactivite repart apres traitement complet des
-       octets disponibles, jamais a la reception d'un seul. Une
-       ecriture flash de plusieurs dizaines de millisecondes ne doit
-       pas etre comptee comme une periode de silence. */
-    if (recu) {
+    /* The inactivity timer resets after processing all available bytes,
+       never on receipt of a single one. A flash write lasting several
+       tens of milliseconds must not be counted as a silence period. */
+    if (received) {
         last_activity_ms = now_ms;
         return;
     }
 
     if (state == PROTO_RECEIVING) {
         if ((now_ms - last_activity_ms) > timeout_ms) {
-            /* L'emetteur ne repond plus. Le slot cible contient un
-               firmware partiel ; les metadonnees restent en
-               IN_PROGRESS, ce que le prochain demarrage saura
-               interpreter. */
+            /* The sender has gone silent. The target slot contains a
+               partial firmware; metadata remains IN_PROGRESS, which
+               the next boot will know how to interpret. */
             abort_transfer();
             last_activity_ms = now_ms;
         }

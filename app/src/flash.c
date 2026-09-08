@@ -3,7 +3,7 @@
 #include "metadata.h"
 
 /* ----------------------------------------------------------------
- * Registres — RM0351 section 3.7
+ * Registers — RM0351 section 3.7
  * ---------------------------------------------------------------- */
 #define FLASH_R_BASE        0x40022000UL
 
@@ -11,7 +11,7 @@
 #define FLASH_SR            (*(volatile uint32_t *)(FLASH_R_BASE + 0x10))
 #define FLASH_CR            (*(volatile uint32_t *)(FLASH_R_BASE + 0x14))
 
-/* Cles de deverrouillage — RM0351 section 3.7.3 */
+/* Unlock keys — RM0351 section 3.7.3 */
 #define FLASH_KEY1          0x45670123UL
 #define FLASH_KEY2          0xCDEF89ABUL
 
@@ -29,7 +29,7 @@
 #define SR_OPERR            (1U <<  1)
 #define SR_EOP              (1U <<  0)
 
-/* Tous les drapeaux d'erreur, effacables en ecrivant 1 */
+/* All error flags, cleared by writing 1 */
 #define SR_ALL_ERRORS       (SR_OPTVERR | SR_RDERR  | SR_FASTERR | \
                              SR_MISERR  | SR_PGSERR | SR_SIZERR  | \
                              SR_PGAERR  | SR_WRPERR | SR_PROGERR | \
@@ -46,7 +46,7 @@
 #define CR_PER              (1U <<  1)
 #define CR_PG               (1U <<  0)
 
-/* Organisation dual-bank : 256 pages de 2 Ko par banque */
+/* Dual-bank layout: 256 pages of 2 KB per bank */
 #define PAGES_PER_BANK      256U
 #define BANK2_START         (FLASH_BASE_ADDR + (PAGES_PER_BANK * FLASH_PAGE_SIZE))
 
@@ -54,22 +54,22 @@
 
 
 /* ----------------------------------------------------------------
- * Utilitaires internes
+ * Internal utilities
  * ---------------------------------------------------------------- */
 
 static void flash_wait_busy(void)
 {
     while (FLASH_SR & SR_BSY) {
-        /* attente active : une page s'efface en une vingtaine de ms,
-           un double-mot s'ecrit en quelques dizaines de us */
+        /* busy wait: a page erase takes ~20 ms,
+           a double-word write takes a few tens of µs */
     }
 }
 
 static void flash_clear_errors(void)
 {
-    /* Les drapeaux sont de type rc_w1 : on les efface en ecrivant 1.
-       Cette etape est obligatoire avant toute programmation, faute de
-       quoi le controleur leve PGSERR (RM0351 3.3.7, etape 2). */
+    /* Flags are of type rc_w1: cleared by writing 1.
+       This step is mandatory before any programming; otherwise the
+       controller raises PGSERR (RM0351 3.3.7, step 2). */
     FLASH_SR = SR_ALL_ERRORS;
 }
 
@@ -83,7 +83,7 @@ static flash_status_t flash_check_errors(void)
     }
 
     if (sr & SR_EOP) {
-        FLASH_SR = SR_EOP;      /* acquitter la fin d'operation */
+        FLASH_SR = SR_EOP;      /* acknowledge end of operation */
     }
 
     return FLASH_OK;
@@ -92,14 +92,14 @@ static flash_status_t flash_check_errors(void)
 static flash_status_t flash_unlock(void)
 {
     if ((FLASH_CR & CR_LOCK) == 0U) {
-        return FLASH_OK;        /* deja deverrouille */
+        return FLASH_OK;        /* already unlocked */
     }
 
     FLASH_KEYR = FLASH_KEY1;
     FLASH_KEYR = FLASH_KEY2;
 
-    /* Une sequence incorrecte laisse LOCK arme jusqu'au prochain
-       reset systeme : il n'est pas possible de reessayer. */
+    /* An incorrect sequence leaves LOCK set until the next system
+       reset: retrying is not possible. */
     return (FLASH_CR & CR_LOCK) ? FLASH_ERR_LOCKED : FLASH_OK;
 }
 
@@ -117,14 +117,14 @@ static int address_in_flash(uint32_t address, uint32_t len)
         return 0;
     }
     if (address + len < address) {
-        return 0;               /* debordement arithmetique */
+        return 0;               /* arithmetic overflow */
     }
     return 1;
 }
 
 
 /* ----------------------------------------------------------------
- * Effacement
+ * Erase
  * ---------------------------------------------------------------- */
 
 flash_status_t flash_erase_page(uint32_t address)
@@ -133,14 +133,14 @@ flash_status_t flash_erase_page(uint32_t address)
         return FLASH_ERR_RANGE;
     }
 
-    /* Une adresse non alignee sur une page effacerait 2 Ko a partir
-       d'une frontiere que l'appelant ne vise pas. On refuse. */
+    /* A non-page-aligned address would erase 2 KB starting from a
+       boundary the caller did not intend to target. Rejected. */
     if (address % FLASH_PAGE_SIZE) {
         return FLASH_ERR_ALIGN;
     }
 
-    /* Conversion adresse -> (banque, numero de page). La numerotation
-       repart a zero dans chaque banque, d'ou le modulo. */
+    /* Convert address -> (bank, page number). Numbering restarts
+       at zero in each bank, hence the modulo. */
     uint32_t offset = address - FLASH_BASE_ADDR;
     uint32_t page   = offset / FLASH_PAGE_SIZE;
     uint32_t bank2  = (page >= PAGES_PER_BANK);
@@ -157,8 +157,8 @@ flash_status_t flash_erase_page(uint32_t address)
 
     flash_clear_errors();
 
-    /* Construction du registre en une ecriture : PER seul, sans PG ni
-       MER1/MER2, sans quoi le controleur leve PGSERR. */
+    /* Build the register in one write: PER only, without PG or
+       MER1/MER2, otherwise the controller raises PGSERR. */
     uint32_t cr = CR_PER | (pnb << CR_PNB_SHIFT);
     if (bank2) {
         cr |= CR_BKER;
@@ -177,7 +177,7 @@ flash_status_t flash_erase_page(uint32_t address)
         return st;
     }
 
-    /* Verification : une page effacee doit contenir 0xFF partout. */
+    /* Verification: an erased page must contain 0xFF throughout. */
     if (!flash_is_erased(address, FLASH_PAGE_SIZE)) {
         return FLASH_ERR_VERIFY;
     }
@@ -187,7 +187,7 @@ flash_status_t flash_erase_page(uint32_t address)
 
 
 /* ----------------------------------------------------------------
- * Ecriture
+ * Write
  * ---------------------------------------------------------------- */
 
 flash_status_t flash_write(uint32_t address, const uint8_t *data, uint32_t len)
@@ -196,11 +196,11 @@ flash_status_t flash_write(uint32_t address, const uint8_t *data, uint32_t len)
         return FLASH_ERR_ALIGN;
     }
 
-    /* Le controleur ne programme que des double-mots alignes.
-       Un desalignement leve PGAERR, un acces plus etroit SIZERR.
-       On refuse en amont plutot que de compenser : le protocole
-       utilise des blocs de 256 octets, ces cas ne doivent pas
-       survenir et signaleraient un bug de l'appelant. */
+    /* The controller only programs aligned double-words.
+       A misalignment raises PGAERR, a narrower access raises SIZERR.
+       Rejected upfront rather than compensated: the protocol uses
+       256-byte blocks, these cases must not occur and would signal
+       a caller bug. */
     if ((address % 8U) || (len % 8U)) {
         return FLASH_ERR_ALIGN;
     }
@@ -222,10 +222,9 @@ flash_status_t flash_write(uint32_t address, const uint8_t *data, uint32_t len)
     FLASH_CR |= CR_PG;
 
     for (uint32_t i = 0; i < len; i += 8U) {
-        /* Les octets sources ne sont pas forcement alignes, on les
-           reassemble mot par mot plutot que de dereferencer un
-           uint32_t* potentiellement desaligne — indefini sur
-           Cortex-M. */
+        /* Source bytes are not necessarily aligned; reassemble word
+           by word rather than dereferencing a potentially misaligned
+           uint32_t* — undefined behavior on Cortex-M. */
         uint32_t low  = (uint32_t)data[i]
                       | ((uint32_t)data[i + 1] << 8)
                       | ((uint32_t)data[i + 2] << 16)
@@ -236,9 +235,9 @@ flash_status_t flash_write(uint32_t address, const uint8_t *data, uint32_t len)
                       | ((uint32_t)data[i + 6] << 16)
                       | ((uint32_t)data[i + 7] << 24);
 
-        /* Les deux mots doivent etre ecrits successivement : la
-           programmation se declenche automatiquement a reception du
-           second (RM0351 3.3.7). */
+        /* The two words must be written consecutively: programming
+           triggers automatically on receipt of the second word
+           (RM0351 3.3.7). */
         *(volatile uint32_t *)(address + i)       = low;
         *(volatile uint32_t *)(address + i + 4U)  = high;
 
@@ -255,9 +254,8 @@ flash_status_t flash_write(uint32_t address, const uint8_t *data, uint32_t len)
     FLASH_CR &= ~CR_PG;
     flash_lock();
 
-    /* Read-back. Verifie le stockage, la ou un CRC de transmission
-       ne validerait que l'acheminement. Detecte une cellule
-       defaillante ou une ecriture partielle. */
+    /* Read-back. Verifies storage, where a transmission CRC only
+       validates delivery. Detects a defective cell or partial write. */
     const uint8_t *written = (const uint8_t *)address;
     for (uint32_t i = 0; i < len; i++) {
         if (written[i] != data[i]) {
@@ -270,7 +268,7 @@ flash_status_t flash_write(uint32_t address, const uint8_t *data, uint32_t len)
 
 
 /* ----------------------------------------------------------------
- * Lecture
+ * Read
  * ---------------------------------------------------------------- */
 
 int flash_is_erased(uint32_t address, uint32_t len)

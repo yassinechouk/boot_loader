@@ -6,63 +6,62 @@
 #include "metadata.h"
 
 /*
- * Machine a etats du protocole de mise a jour.
+ * Update protocol state machine.
  *
- * Ce module assemble les octets recus en trames, valide chacune,
- * execute la commande correspondante et emet la reponse. Il ne
- * connait pas le transport : il consomme ce que uart_getc() lui
- * donne et emet via uart_write(). Un portage sur CAN ne toucherait
- * que ces deux points.
+ * This module assembles incoming bytes into frames, validates each
+ * one, executes the corresponding command and emits the response.
+ * It does not know the transport layer: it consumes whatever
+ * uart_getc() provides and transmits via uart_write(). Porting to
+ * CAN would only touch those two points.
  *
- * Le comportement reproduit celui de tools/bootloader_sim.py, qui
- * sert de specification executable et dont les 64 tests decrivent
- * les cas limites attendus.
+ * The behavior mirrors that of tools/bootloader_sim.py, which
+ * serves as the executable specification and whose 64 tests
+ * describe the expected edge cases.
  *
- * Effacement paresseux
- * --------------------
- * Le simulateur efface le slot entier au demarrage du transfert.
- * Sur silicium, 480 Ko representent 240 pages a une vingtaine de
- * millisecondes chacune, soit pres de cinq secondes d'indisponibilite
- * — pour un firmware qui n'en occupera peut-etre que 20 Ko.
+ * Lazy erase
+ * ----------
+ * The simulator erases the entire slot at the start of a transfer.
+ * On silicon, 480 KB represents 240 pages at roughly twenty
+ * milliseconds each, nearly five seconds of unavailability —
+ * for a firmware that may occupy only 20 KB.
  *
- * Ce module efface donc page par page, juste avant d'y ecrire. La
- * taille de bloc de 256 octets divisant les 2048 octets d'une page,
- * chaque frontiere de page coincide exactement avec une frontiere de
- * bloc : le test se reduit a offset % FLASH_PAGE_SIZE == 0.
+ * This module therefore erases page by page, just before writing.
+ * The 256-byte block size divides the 2048-byte page exactly, so
+ * every page boundary coincides with a block boundary: the test
+ * reduces to offset % FLASH_PAGE_SIZE == 0.
  *
- * Base de temps injectee
- * ----------------------
- * protocol_poll() recoit l'heure courante en parametre plutot que de
- * dependre d'un timer. Le module reste ainsi testable sur PC, et le
- * choix de la source de temps — SysTick, TIM, autre — appartient a
- * l'appelant.
+ * Injected time base
+ * ------------------
+ * protocol_poll() receives the current time as a parameter rather
+ * than depending on a timer. The module remains testable on a PC,
+ * and the choice of time source — SysTick, TIM, other — belongs
+ * to the caller.
  */
 
 typedef enum {
-    PROTO_IDLE = 0,       /* aucun transfert en cours              */
-    PROTO_RECEIVING,      /* transfert commence, blocs attendus    */
-    PROTO_COMPLETE        /* firmware valide, redemarrage attendu  */
+    PROTO_IDLE = 0,       /* no transfer in progress               */
+    PROTO_RECEIVING,      /* transfer started, blocks expected     */
+    PROTO_COMPLETE        /* valid firmware, reboot pending        */
 } protocol_state_t;
 
-/* Prepare le module. A appeler apres uart_init() et crc32_init(). */
+/* Initialises the module. Must be called after uart_init() and crc32_init(). */
 void protocol_init(void);
 
 /*
- * Consomme les octets disponibles, traite les trames completes.
- * A appeler en boucle. now_ms est une base de temps monotone en
- * millisecondes ; sa precision n'a d'importance que pour les
- * timeouts.
+ * Consumes available bytes and processes complete frames.
+ * Must be called in a loop. now_ms is a monotonic time base in
+ * milliseconds; its precision only matters for timeouts.
  */
 void protocol_poll(uint32_t now_ms);
 
-/* Etat courant de la machine a etats. */
+/* Current state of the state machine. */
 protocol_state_t protocol_get_state(void);
 
-/* Vrai lorsqu'un firmware vient d'etre valide et que le bootloader
-   doit redemarrer pour l'executer. */
+/* True when a firmware has just been validated and the bootloader
+   must reboot to execute it. */
 int protocol_update_complete(void);
 
-/* --- Diagnostic --- */
+/* --- Diagnostics --- */
 uint32_t protocol_frames_received(void);
 uint32_t protocol_frames_rejected(void);
 uint32_t protocol_bytes_written(void);
