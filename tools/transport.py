@@ -31,6 +31,11 @@ class Timeout(TransportError):
     pass
 
 
+class Disconnected(TransportError):
+    """Le port serie a disparu : carte debranchee ou ST-LINK reinitialise."""
+    pass
+
+
 class SerialTransport:
     """
     Envoie une trame, attend la reponse, la decode.
@@ -74,8 +79,11 @@ class SerialTransport:
     def send(self, frame: p.Frame):
         raw = p.encode(frame)
         self._log(f"-> {frame}  ({len(raw)} octets)")
-        self.ser.write(raw)
-        self.ser.flush()
+        try:
+            self.ser.write(raw)
+            self.ser.flush()
+        except serial.SerialException as e:
+            raise Disconnected("ecriture impossible sur le port") from e
 
     def receive(self, timeout: float = None) -> p.Frame:
         """
@@ -89,7 +97,10 @@ class SerialTransport:
         # --- chercher le magic ---
         fenetre = b""
         while time.time() < limite:
-            octet = self.ser.read(1)
+            try:
+                octet = self.ser.read(1)
+            except serial.SerialException as e:
+                raise Disconnected("lecture impossible sur le port") from e
             if not octet:
                 continue
             fenetre = (fenetre + octet)[-2:]
@@ -118,7 +129,10 @@ class SerialTransport:
         while len(buf) < n:
             if time.time() > limite:
                 raise Timeout(f"{len(buf)}/{n} octets recus")
-            morceau = self.ser.read(n - len(buf))
+            try:
+                morceau = self.ser.read(n - len(buf))
+            except serial.SerialException as e:
+                raise Disconnected("lecture interrompue") from e
             if morceau:
                 buf += morceau
         return buf
@@ -139,11 +153,30 @@ class SerialTransport:
             try:
                 self.send(frame)
                 return self.receive()
+
+            except serial.SerialException as e:
+                # Le port a disparu : carte debranchee, ou reset du
+                # ST-LINK. Reessayer n'a aucun sens, et laisser
+                # remonter l'exception brute donnerait une trace
+                # Python illisible au lieu d'un diagnostic.
+                raise Disconnected(
+                    "la carte s'est deconnectee en cours de transfert"
+                ) from e
+
             except (Timeout, p.BadCRC, p.BadMagic) as e:
+                # Ces trois cas sont rattrapables : trame perdue,
+                # corrompue, ou desynchronisation. La retransmission
+                # est inoffensive cote bootloader — retraiter une
+                # trame deja recue produit le meme resultat.
                 derniere = e
                 if essai < retries - 1:
                     self._log(f"echec ({e}), nouvel essai")
-                    self.ser.reset_input_buffer()
+                    try:
+                        self.ser.reset_input_buffer()
+                    except serial.SerialException as e2:
+                        raise Disconnected(
+                            "la carte s'est deconnectee"
+                        ) from e2
                     time.sleep(0.05)
 
         raise TransportError(

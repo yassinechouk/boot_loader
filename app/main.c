@@ -58,7 +58,7 @@
 #define LED_PIN             5
 
 /* Nombre de cycles applicatifs avant de se declarer sain. */
-#define CYCLES_AVANT_CONFIRMATION   9999999
+#define CYCLES_AVANT_CONFIRMATION   3
 
 
 /* ----------------------------------------------------------------

@@ -22,7 +22,7 @@ import time
 
 import protocol as p
 from crc32 import crc32_stm32
-from transport import SerialTransport, TransportError, Timeout
+from transport import SerialTransport, TransportError, Timeout, Disconnected
 
 
 # ---------------------------------------------------------------
@@ -150,9 +150,13 @@ def envoyer(tr, firmware: bytes, slot: int, version: int,
     for bloc in blocs:
         try:
             rep = tr.exchange(p.Frame(p.CMD_DATA, seq, bloc))
+        except Disconnected:
+            print()
+            raise
         except TransportError as e:
             print()
-            echec(f"bloc {seq} : {e}")
+            echec(f"bloc {seq}/{len(blocs)} : {e}")
+            info(f"{envoyes} octets transmis avant l'echec")
             return False
 
         if rep.cmd == p.RSP_NACK:
@@ -227,6 +231,12 @@ def main():
     print(Term.c("\nMise a jour firmware", Term.GRAS))
     print(f"  port {args.port} @ {args.baud} bauds")
 
+    # Un message de diagnostic doit decrire l'etat reel de la carte.
+    # Sans ce drapeau, une deconnexion survenue AVANT le transfert
+    # afficherait un avertissement sur une image partielle qui
+    # n'existe pas — envoyant chercher au mauvais endroit.
+    transfert_commence = False
+
     try:
         with SerialTransport(args.port, args.baud, verbose=args.verbose) as tr:
 
@@ -276,6 +286,8 @@ def main():
                 firmware += b"\xFF" * comble
                 info(f"complete de {comble} octets (alignement 64 bits)")
 
+            transfert_commence = True
+
             if not envoyer(tr, firmware, slot, version, args.baud):
                 print()
                 return 1
@@ -286,11 +298,28 @@ def main():
     except KeyboardInterrupt:
         print("\n\n  interrompu")
         return 130
+
+    except Disconnected as e:
+        print()
+        echec(str(e))
+        if transfert_commence:
+            info("le slot cible contient une image partielle ; ses")
+            info("metadonnees restent en IN_PROGRESS, ce que le")
+            info("bootloader saura interpreter au prochain demarrage.")
+            info("Le slot actif n'a pas ete touche : la carte demarre")
+            info("normalement sur son firmware precedent.")
+        else:
+            info("aucun transfert n'avait commence : la carte est intacte")
+            info("verifiez le cable, rebranchez, puis relancez")
+        return 1
+
     except TransportError as e:
         print()
         echec(str(e))
         info("verifiez que la carte est en mode reception "
              "et qu'aucun terminal ne retient le port")
+        info("la fenetre d'ecoute du bootloader ne dure que 2 s "
+             "apres le reset")
         return 1
 
 
