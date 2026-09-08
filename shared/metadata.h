@@ -60,57 +60,85 @@ typedef enum {
 } fw_state_t;
 
 /* =========================================================
- * Structure de metadonnees (32 octets, sans padding)
+ * Description d'un slot (16 octets, sans padding)
  *
- * Ecrite en double exemplaire dans deux pages distinctes.
- * A chaque mise a jour, seule la page inactive est effacee :
- * l'autre reste intacte et lisible, ce qui garantit qu'une
- * coupure d'alimentation ne detruit jamais les deux copies.
+ * Chaque emplacement porte SES PROPRES taille, CRC et version.
  *
- * Une copie est valide si son magic correspond ET si son CRC est
- * correct. Le magic seul ne suffit pas : il est ecrit dans le meme
- * bloc de 8 octets que le compteur, donc une coupure apres la
- * premiere ecriture laisserait un magic valide devant des champs
- * encore a 0xFF. fw_size vaudrait alors 0xFFFFFFFF, soit 4 Go, et
- * le bootloader sortirait des limites de la flash en tentant de
- * verifier le firmware.
+ * Une premiere version de cette structure ne decrivait que le
+ * firmware actif. Le defaut n'apparaissait qu'au rollback : en
+ * basculant vers l'autre slot, les metadonnees conservaient la
+ * taille et le CRC de l'image rejetee. Le bootloader lisait alors
+ * VALID, recalculait le CRC du slot de repli contre une valeur
+ * erronee, constatait la divergence et refusait de demarrer — sur
+ * une carte pourtant porteuse d'un firmware fonctionnel.
  *
- * Le CRC couvre les 28 octets precedents. Il detecte l'ecriture
- * incomplete comme la degradation d'une cellule au fil du temps.
- *
- * La taille de 32 octets n'est pas fortuite : le controleur flash
- * ne programme que par double-mot de 64 bits, donc par multiples de
- * 8 octets. Une structure de 28 octets aurait impose d'ecrire 32
- * octets pour une structure qui en fait 28, creant un ecart
- * permanent entre sizeof() et ce qui est reellement en flash. Le
- * champ reserved absorbe la difference.
- *
- * reserved doit toujours etre mis a zero. Ce n'est pas necessaire
- * a la correction — le CRC valide ce qui a ete ecrit, quel qu'il
- * soit — mais cela garde les dumps memoire lisibles et permettra,
- * le jour ou un de ces octets sera utilise, de distinguer une
- * valeur ecrite par une version recente d'un residu.
- *
- * La copie faisant foi est celle dont le compteur est le plus
- * eleve parmi celles qui sont valides.
- *
- * Le debordement du compteur 32 bits est ignore : l'endurance
- * de la flash (environ 10 000 cycles par page) constitue la
- * limite effective, cinq ordres de grandeur plus bas.
+ * Le rollback avait sauve la carte une fois, puis l'immobilisait au
+ * redemarrage suivant. Decrire les deux slots independamment
+ * supprime le probleme : basculer ne consiste plus qu'a changer
+ * active_slot.
  * ========================================================= */
 typedef struct {
-    uint32_t magic;             /* METADATA_MAGIC si la copie est valide */
-    uint32_t counter;           /* incremente a chaque ecriture          */
-    uint32_t fw_size;           /* taille du firmware actif              */
-    uint32_t fw_crc32;          /* CRC32 attendu de ce firmware          */
-    uint32_t fw_version;        /* version du firmware actif             */
-    uint8_t  active_slot;       /* SLOT_A ou SLOT_B                      */
+    uint32_t size;              /* taille de l'image, 0 si absente       */
+    uint32_t crc32;             /* CRC32 attendu de cette image          */
+    uint32_t version;           /* version du firmware                   */
     uint8_t  state;             /* fw_state_t                            */
-    uint8_t  boot_fail_count;   /* demarrages rates consecutifs          */
-    uint8_t  reserved[5];       /* extension future, toujours a zero     */
-    uint32_t meta_crc32;        /* CRC32 des 28 octets precedents        */
-} metadata_t;                   /* 32 octets : multiple de l'unite       */
-                                /* d'ecriture flash (double-mot 64 bits) */
+    uint8_t  reserved[3];       /* extension future, toujours a zero     */
+} slot_info_t;                  /* 16 octets */
+
+/* =========================================================
+ * Structure de metadonnees (48 octets, sans padding)
+ *
+ * Ecrite en double exemplaire dans deux pages distinctes. A chaque
+ * mise a jour, seule la page inactive est effacee : l'autre reste
+ * intacte et lisible, ce qui garantit qu'une coupure d'alimentation
+ * ne detruit jamais les deux copies.
+ *
+ * Une copie est valide si son magic correspond ET si son CRC est
+ * correct. Le magic seul ne suffirait pas : il partage son bloc de
+ * 8 octets avec le compteur, donc une coupure apres la premiere
+ * ecriture laisserait un magic valide devant des champs encore a
+ * 0xFF. size vaudrait alors 0xFFFFFFFF, soit 4 Go, et le bootloader
+ * sortirait des limites de la flash en tentant de verifier l'image.
+ *
+ * Le CRC couvre les 44 octets precedents. Il detecte l'ecriture
+ * incomplete comme la degradation d'une cellule au fil du temps.
+ *
+ * La copie faisant foi est celle dont le compteur est le plus eleve
+ * parmi celles qui sont valides.
+ *
+ * La taille de 48 octets est un multiple de 8, l'unite de
+ * programmation du controleur flash. La structure est donc ecrite
+ * telle quelle, sans ecart entre sizeof() et ce qui est en flash.
+ *
+ * Repartition des champs
+ * ----------------------
+ * size, crc32, version et state sont PAR SLOT : chaque image porte
+ * les siens en permanence, y compris celle qui n'est pas active.
+ *
+ * active_slot, boot_fail_count et counter sont GLOBAUX. Le compteur
+ * d'echecs en particulier ne decrit jamais qu'un seul slot : un seul
+ * peut etre en STATE_TESTING a la fois, puisque le bootloader ne
+ * saute que vers active_slot. Le dupliquer par slot laisserait un
+ * champ perpetuellement inutilise et suggererait une coexistence qui
+ * ne se produit pas.
+ *
+ * Cette derniere propriete cesserait de tenir avec plus de deux
+ * slots, ou si plusieurs images pouvaient etre evaluees en
+ * parallele. Le compteur devrait alors devenir per-slot.
+ *
+ * Le debordement du compteur 32 bits est ignore : l'endurance de la
+ * flash, environ 10 000 cycles par page, constitue la limite
+ * effective, cinq ordres de grandeur plus bas.
+ * ========================================================= */
+typedef struct {
+    uint32_t    magic;          /* METADATA_MAGIC si la copie est valide */
+    uint32_t    counter;        /* incremente a chaque ecriture          */
+    slot_info_t slot[2];        /* [SLOT_A] et [SLOT_B], independants    */
+    uint8_t     active_slot;    /* SLOT_A ou SLOT_B                      */
+    uint8_t     boot_fail_count;/* demarrages sans confirmation          */
+    uint8_t     reserved[2];    /* extension future, toujours a zero     */
+    uint32_t    meta_crc32;     /* CRC32 des 44 octets precedents        */
+} metadata_t;                   /* 48 octets */
 
 #define METADATA_MAGIC          0x424C4D44UL   /* "BLMD" */
 #define METADATA_SIZE           sizeof(metadata_t)

@@ -170,13 +170,15 @@ static void jump_to_application(uint32_t base)
  * Verification d'une image avant execution
  * ---------------------------------------------------------------- */
 
-static int image_is_intact(const metadata_t *meta)
+static int image_is_intact(const metadata_t *meta, uint8_t slot)
 {
-    if (meta->fw_size == 0U || meta->fw_size > SLOT_SIZE) {
+    const slot_info_t *info = &meta->slot[slot];
+
+    if (info->size == 0U || info->size > SLOT_SIZE) {
         return 0;
     }
 
-    uint32_t base = SLOT_ADDR(meta->active_slot);
+    uint32_t base = SLOT_ADDR(slot);
 
     if (!slot_looks_bootable(base)) {
         return 0;
@@ -185,9 +187,9 @@ static int image_is_intact(const metadata_t *meta)
     /* Recalcul du CRC a chaque demarrage. Une cellule flash peut se
        degrader avec le temps ; mieux vaut le decouvrir ici que
        d'executer du code corrompu. */
-    uint32_t calcule = crc32_compute((const uint8_t *)base, meta->fw_size);
+    uint32_t calcule = crc32_compute((const uint8_t *)base, info->size);
 
-    return (calcule == meta->fw_crc32);
+    return (calcule == info->crc32);
 }
 
 
@@ -266,24 +268,38 @@ int main(void)
         while (1) { }
     }
 
+    uint8_t actif = meta.active_slot;
+
     uart_puts("Slot actif  : ");
-    uart_putc((char)('A' + meta.active_slot));
+    uart_putc((char)('A' + actif));
     uart_puts("\r\nEtat        : ");
-    log_state(meta.state);
+    log_state(meta.slot[actif].state);
     uart_puts("\r\nTaille      : ");
-    uart_dec(meta.fw_size);
+    uart_dec(meta.slot[actif].size);
     uart_puts(" octets\r\nVersion     : ");
-    uart_hex32(meta.fw_version);
+    uart_hex32(meta.slot[actif].version);
     uart_puts("\r\nEchecs boot : ");
     uart_dec(meta.boot_fail_count);
-    uart_puts("\r\n\r\n");
+    uart_puts("\r\n");
 
-    switch (meta.state) {
+    /* L'autre slot est affiche aussi : c'est lui qui servira de repli
+       en cas de rollback, et savoir ce qu'il contient evite de
+       decouvrir trop tard qu'il est vide. */
+    uint8_t autre_slot = OTHER_SLOT(actif);
+    uart_puts("Repli       : slot ");
+    uart_putc((char)('A' + autre_slot));
+    uart_puts(", ");
+    log_state(meta.slot[autre_slot].state);
+    uart_puts(", ");
+    uart_dec(meta.slot[autre_slot].size);
+    uart_puts(" octets\r\n\r\n");
+
+    switch (meta.slot[actif].state) {
 
     case STATE_VALID:
-        if (image_is_intact(&meta)) {
+        if (image_is_intact(&meta, actif)) {
             update_mode(BOOT_WAIT_MS);   /* laisser une chance au PC */
-            jump_to_application(SLOT_ADDR(meta.active_slot));
+            jump_to_application(SLOT_ADDR(actif));
         }
         uart_puts("Image invalide malgre l'etat VALID\r\n");
         break;
@@ -294,11 +310,25 @@ int main(void)
                fonctionnement. On revient au slot precedent. */
             uart_puts("Seuil d'echecs atteint, rollback\r\n");
 
-            uint8_t autre = OTHER_SLOT(meta.active_slot);
+            uint8_t autre = OTHER_SLOT(actif);
+
+            /* Verifier le repli AVANT de basculer : rejeter l'image
+               courante pour se retrouver sans rien serait pire que
+               de continuer a l'essayer. */
+            if (meta.slot[autre].state == STATE_EMPTY ||
+                !image_is_intact(&meta, autre)) {
+                uart_puts("Aucune image de repli exploitable\r\n");
+                break;
+            }
+
+            /* Seuls active_slot, le compteur et l'etat du slot
+               rejete changent. Les descriptions des deux images
+               restent intactes — c'est tout l'interet de les avoir
+               separees. */
             metadata_t precedent = meta;
-            precedent.active_slot     = autre;
-            precedent.state           = STATE_VALID;
-            precedent.boot_fail_count = 0;
+            precedent.slot[actif].state = STATE_EMPTY;
+            precedent.active_slot       = autre;
+            precedent.boot_fail_count   = 0;
 
             if (metadata_write(&precedent) == META_OK &&
                 slot_looks_bootable(SLOT_ADDR(autre))) {
@@ -311,7 +341,7 @@ int main(void)
             break;
         }
 
-        if (image_is_intact(&meta)) {
+        if (image_is_intact(&meta, actif)) {
             /* Incrementer AVANT de sauter. Si l'application plante,
                le compteur aura deja progresse au prochain reset.
                L'incrementer apres n'aurait aucun effet, puisqu'on ne
@@ -327,7 +357,7 @@ int main(void)
             uart_puts("\r\n");
 
             update_mode(BOOT_WAIT_MS);
-            jump_to_application(SLOT_ADDR(meta.active_slot));
+            jump_to_application(SLOT_ADDR(actif));
         }
         uart_puts("Image en test invalide\r\n");
         break;

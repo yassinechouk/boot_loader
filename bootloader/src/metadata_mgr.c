@@ -175,12 +175,15 @@ metadata_status_t metadata_write(const metadata_t *src)
 
     out.magic           = METADATA_MAGIC;
     out.counter         = counter;
-    out.fw_size         = src->fw_size;
-    out.fw_crc32        = src->fw_crc32;
-    out.fw_version      = src->fw_version;
     out.active_slot     = src->active_slot;
-    out.state           = src->state;
     out.boot_fail_count = src->boot_fail_count;
+
+    for (unsigned s = 0; s < 2U; s++) {
+        out.slot[s].size    = src->slot[s].size;
+        out.slot[s].crc32   = src->slot[s].crc32;
+        out.slot[s].version = src->slot[s].version;
+        out.slot[s].state   = src->slot[s].state;
+    }
 
     out.meta_crc32 = crc32_compute((const uint8_t *)&out,
                                    META_CRC_COVERAGE);

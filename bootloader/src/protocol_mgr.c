@@ -124,8 +124,8 @@ static void on_get_info(uint16_t seq)
 
     if (metadata_read(&meta)) {
         active = meta.active_slot;
-        st     = meta.state;
-        ver    = meta.fw_version;
+        st     = meta.slot[active].state;
+        ver    = meta.slot[active].version;
     }
 
     /* La reponse est construite octet par octet plutot que par un
@@ -206,11 +206,19 @@ static void on_start_update(uint16_t seq, const uint8_t *data, uint16_t len)
     for (unsigned i = 0; i < sizeof(nouvelle); i++) {
         raw[i] = 0;
     }
-    nouvelle.fw_size     = size;
-    nouvelle.fw_crc32    = crc;
-    nouvelle.fw_version  = ver;
-    nouvelle.active_slot = active;      /* inchange tant que non valide */
-    nouvelle.state       = STATE_IN_PROGRESS;
+    /* On repart de l'etat courant : les informations de l'AUTRE slot
+       doivent survivre, faute de quoi un rollback ulterieur ne
+       saurait plus decrire l'image de repli. */
+    metadata_t courant;
+    if (metadata_read(&courant)) {
+        nouvelle = courant;
+    }
+    nouvelle.active_slot        = active;   /* inchange tant que non valide */
+    nouvelle.boot_fail_count    = 0;
+    nouvelle.slot[slot].size    = size;
+    nouvelle.slot[slot].crc32   = crc;
+    nouvelle.slot[slot].version = ver;
+    nouvelle.slot[slot].state   = STATE_IN_PROGRESS;
 
     if (metadata_write(&nouvelle) != META_OK) {
         send_nack(seq, ERR_FLASH);
@@ -336,11 +344,16 @@ static void on_end_update(uint16_t seq)
     for (unsigned i = 0; i < sizeof(meta); i++) {
         raw[i] = 0;
     }
-    meta.fw_size     = fw_size;
-    meta.fw_crc32    = fw_crc32;
-    meta.fw_version  = fw_version;
-    meta.active_slot = target_slot;
-    meta.state       = STATE_TESTING;
+    metadata_t courant2;
+    if (metadata_read(&courant2)) {
+        meta = courant2;
+    }
+    meta.active_slot                  = target_slot;
+    meta.boot_fail_count              = 0;
+    meta.slot[target_slot].size       = fw_size;
+    meta.slot[target_slot].crc32      = fw_crc32;
+    meta.slot[target_slot].version    = fw_version;
+    meta.slot[target_slot].state      = STATE_TESTING;
 
     if (metadata_write(&meta) != META_OK) {
         send_nack(seq, ERR_FLASH);

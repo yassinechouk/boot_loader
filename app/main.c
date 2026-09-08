@@ -58,7 +58,7 @@
 #define LED_PIN             5
 
 /* Nombre de cycles applicatifs avant de se declarer sain. */
-#define CYCLES_AVANT_CONFIRMATION   3
+#define CYCLES_AVANT_CONFIRMATION   9999999
 
 
 /* ----------------------------------------------------------------
@@ -156,12 +156,17 @@ static void confirmer_demarrage(void)
         return;
     }
 
-    if (meta.state == STATE_VALID && meta.boot_fail_count == 0U) {
+    uint8_t moi = slot_courant();
+
+    if (meta.slot[moi].state == STATE_VALID && meta.boot_fail_count == 0U) {
         uart_puts("  deja confirmee\r\n");
         return;
     }
 
-    meta.state           = STATE_VALID;
+    /* Seul l'etat de MON slot change. Celui de l'autre decrit une
+       image que je ne connais pas et qui doit rester utilisable
+       comme repli. */
+    meta.slot[moi].state = STATE_VALID;
     meta.boot_fail_count = 0;
 
     if (metadata_write(&meta) == META_OK) {
@@ -178,21 +183,23 @@ static void confirmer_demarrage(void)
 
 static void verifier_image(const metadata_t *meta)
 {
-    uint32_t base = SLOT_ADDR(slot_courant());
+    uint8_t moi = slot_courant();
+    uint32_t base = SLOT_ADDR(moi);
+    const slot_info_t *info = &meta->slot[moi];
 
-    if (meta->fw_size == 0U || meta->fw_size > SLOT_SIZE) {
+    if (info->size == 0U || info->size > SLOT_SIZE) {
         uart_puts("  taille invalide, verification ignoree\r\n");
         return;
     }
 
-    uint32_t calcule = crc32_compute((const uint8_t *)base, meta->fw_size);
+    uint32_t calcule = crc32_compute((const uint8_t *)base, info->size);
 
     uart_puts("  CRC calcule : ");
     uart_hex32(calcule);
     uart_puts("\r\n  CRC attendu : ");
-    uart_hex32(meta->fw_crc32);
-    uart_puts(calcule == meta->fw_crc32 ? "   concordant\r\n"
-                                        : "   DIVERGENT\r\n");
+    uart_hex32(info->crc32);
+    uart_puts(calcule == info->crc32 ? "   concordant\r\n"
+                                     : "   DIVERGENT\r\n");
 }
 
 
@@ -224,15 +231,15 @@ int main(void)
     metadata_t meta;
     if (metadata_read(&meta)) {
         uart_puts("Etat        : ");
-        switch (meta.state) {
+        switch (meta.slot[slot_courant()].state) {
         case STATE_EMPTY:       uart_puts("EMPTY");       break;
         case STATE_IN_PROGRESS: uart_puts("IN_PROGRESS"); break;
         case STATE_TESTING:     uart_puts("TESTING");     break;
         case STATE_VALID:       uart_puts("VALID");       break;
-        default:                uart_dec(meta.state);     break;
+        default:                uart_dec(meta.slot[slot_courant()].state); break;
         }
         uart_puts("\r\nVersion     : ");
-        uart_hex32(meta.fw_version);
+        uart_hex32(meta.slot[slot_courant()].version);
         uart_puts("\r\nEchecs boot : ");
         uart_dec(meta.boot_fail_count);
         uart_puts("\r\n\r\nVerification de l'image :\r\n");
