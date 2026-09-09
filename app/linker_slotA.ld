@@ -18,7 +18,19 @@ MEMORY
     RAM   (rwx) : ORIGIN = 0x20000000, LENGTH = 96K
 }
 
-_estack = ORIGIN(RAM) + LENGTH(RAM);
+/* Boot request flag -- the last word of RAM.
+   The address is defined HERE rather than hard-coded in C, because
+   the linker script is the only place that knows where RAM ends. A
+   change to LENGTH(RAM) then moves the flag and the stack top
+   together, instead of silently placing one inside the other.
+   See shared/boot_request.h.
+
+   Eight bytes are subtracted from the stack, not four: AAPCS
+   requires the stack pointer to be 8-byte aligned at every public
+   interface and GCC generates code assuming it. Reserving only four
+   would leave _estack at ...FFC to save four bytes out of 96 KB. */
+_boot_request = ORIGIN(RAM) + LENGTH(RAM) - 4;
+_estack       = ORIGIN(RAM) + LENGTH(RAM) - 8;
 
 SECTIONS
 {

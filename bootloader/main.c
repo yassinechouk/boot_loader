@@ -9,6 +9,7 @@
 #include "metadata_mgr.h"
 #include "protocol.h"
 #include "protocol_mgr.h"
+#include "boot_request.h"
 
 /*
  * Bootloader -- entry point.
@@ -67,7 +68,8 @@
  * below the three-second timeout.
  */
 
-#define BOOT_WAIT_MS        2000U   /* listen window after reset */
+#define BOOT_WAIT_MS        2000U    /* listen window after reset      */
+#define OTA_WAIT_MS         30000U   /* listen window after a request  */
 #define MSI_DEFAULT_HZ      4000000UL
 
 #define SCB_VTOR            (*(volatile uint32_t *)0xE000ED08UL)
@@ -292,6 +294,35 @@ int main(void)
     crc32_init();
     protocol_init();
 
+    /* ---- Boot request ------------------------------------------------
+     * The flag is read here and cleared immediately, before anything
+     * is done with it: clearing afterwards would mean a reset during
+     * the transfer left the request set, and the board would re-enter
+     * update mode on every boot from then on.
+     *
+     * What the flag changes is how LONG the listen window is, not
+     * whether the application eventually runs. Waiting indefinitely
+     * was the obvious first version and the wrong one: a transfer
+     * that never starts -- wrong file, busy port, host interrupted --
+     * would park a board that has a perfectly good application in
+     * flash, recoverable only with the reset button. That is exactly
+     * the button this mechanism exists to avoid needing.
+     *
+     * So the window is long enough that no plausible host is late,
+     * and finite so that a failed attempt leaves the board where it
+     * started. update_mode() only honours its timeout while the
+     * protocol is idle, so a transfer already under way is never cut
+     * short by it.
+     * ---------------------------------------------------------------- */
+    uint32_t listen_ms   = BOOT_WAIT_MS;
+    int      ota_request = 0;
+
+    if (boot_request_pending()) {
+        boot_request_clear();
+        ota_request = 1;
+        listen_ms   = OTA_WAIT_MS;
+    }
+
     uart_puts("\r\n\r\n========================================\r\n");
     uart_puts("  BOOTLOADER v");
     uart_dec((BOOTLOADER_VERSION >> 16) & 0xFFU);
@@ -303,6 +334,15 @@ int main(void)
 
     if (reset_by_watchdog) {
         uart_puts("Reset caused by the watchdog\r\n");
+    }
+
+    if (ota_request) {
+        /* The host script waits for this line before starting the
+           transfer. Not seeing it means the flag was ignored -- an
+           older bootloader, whose stack still reaches the flag word. */
+        uart_puts("OTA request accepted, listening for ");
+        uart_dec(OTA_WAIT_MS / 1000U);
+        uart_puts(" s\r\n");
     }
 
     metadata_t meta;

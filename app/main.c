@@ -5,6 +5,7 @@
 #include "metadata.h"
 #include "metadata_mgr.h"
 #include "iwdg.h"
+#include "boot_request.h"
 
 /*
  * Application -- demonstrates the update lifecycle.
@@ -68,6 +69,7 @@
 #define USART2_CR1          (*(volatile uint32_t *)(USART2_BASE + 0x00))
 #define USART2_BRR          (*(volatile uint32_t *)(USART2_BASE + 0x0C))
 #define USART2_ISR          (*(volatile uint32_t *)(USART2_BASE + 0x1C))
+#define USART2_RDR          (*(volatile uint32_t *)(USART2_BASE + 0x24))
 #define USART2_TDR          (*(volatile uint32_t *)(USART2_BASE + 0x28))
 
 #define SCB_VTOR            (*(volatile uint32_t *)0xE000ED08UL)
@@ -140,6 +142,25 @@ static void delay(volatile uint32_t n)
     while (n--) {
         __asm__("nop");
     }
+}
+
+/* Non-blocking UART receive. Returns 1 and stores the byte if one is
+ * available, 0 otherwise. RXNE is bit 5 of USART2_ISR. */
+static int uart_getc(uint8_t *c)
+{
+    if (USART2_ISR & (1U << 5)) {
+        *c = (uint8_t)(USART2_RDR & 0xFFU);
+        return 1;
+    }
+    return 0;
+}
+
+/* Software reset via AIRCR -- identical to what the bootloader uses.
+ * The CPU restarts from the reset vector; RAM is preserved. */
+static void software_reset(void)
+{
+    *(volatile uint32_t *)0xE000ED0CUL = 0x05FA0004UL;
+    while (1) { }    /* unreachable, silences compiler warning */
 }
 
 
@@ -290,6 +311,21 @@ int main(void)
         uart_puts("cycle ");
         uart_dec(cycle);
         uart_puts("\r\n");
+
+        /* OTA trigger: if the host sends the character 'U' over UART,
+         * the application sets the boot request flag and resets.
+         * The bootloader will detect the flag and enter update mode
+         * immediately, without any time window constraint.
+         *
+         * Usage from a PC terminal:
+         *   echo -n 'U' > /dev/ttyACM0
+         *   flash                         (run immediately after) */
+        uint8_t rx;
+        if (uart_getc(&rx) && rx == 'U') {
+            uart_puts("\r\nOTA request received -- resetting to bootloader\r\n");
+            boot_request_set();
+            software_reset();
+        }
 
         /* Confirmation only happens after several complete cycles.
            Confirming on the first line of main() would validate an
