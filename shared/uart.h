@@ -4,7 +4,7 @@
 #include <stdint.h>
 
 /*
- * USART2 driver — polling TX, interrupt-driven RX.
+ * USART2 driver -- polling TX, interrupt-driven RX.
  *
  * On the Nucleo-L476RG, USART2 is connected to the ST-LINK
  * virtual COM port via PA2 (TX) and PA3 (RX), with solder bridges
@@ -12,8 +12,8 @@
  *
  * Why interrupt-driven reception
  * --------------------------------
- * At 115200 baud, one byte arrives every ~87 µs. A 256-byte flash
- * write takes a few hundred µs, a page erase roughly twenty ms —
+ * At 115200 baud, one byte arrives every ~87 us. A 256-byte flash
+ * write takes a few hundred us, a page erase roughly twenty ms --
  * enough to miss over two hundred bytes if the CPU polled the
  * register in a loop.
  *
@@ -25,7 +25,7 @@
  * good behavior.
  *
  * The ISR simply stores the byte in a circular buffer:
- * a few microseconds, well within the 87 µs interval.
+ * a few microseconds, well within the 87 us interval.
  *
  * Lock-free circular buffer
  * --------------------------
@@ -36,7 +36,7 @@
  *
  * One slot is sacrificed to distinguish a full buffer from an
  * empty one: head == tail means empty, (head + 1) % size == tail
- * means full. The alternative — an element counter — would be
+ * means full. The alternative -- an element counter -- would be
  * written by both contexts and would require disabling interrupts
  * on every access.
  *
@@ -54,7 +54,7 @@
  *
  * The event is counted, not signalled: a non-zero counter at the
  * end of a transfer indicates an undersized buffer or processing
- * that is too slow — information that would otherwise be invisible.
+ * that is too slow -- information that would otherwise be invisible.
  *
  * NOT REENTRANT on TX: uart_puts() must not be called from an
  * interrupt while it is executing in the main context.

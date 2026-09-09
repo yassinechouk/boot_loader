@@ -2,7 +2,7 @@
 #include "crc.h"
 
 /* ----------------------------------------------------------------
- * Register addresses — RM0351 section 2.2.2
+ * Register addresses -- RM0351 section 2.2.2
  * ---------------------------------------------------------------- */
 #define RCC_BASE            0x40021000UL
 #define CRC_BASE            0x40023000UL
@@ -21,7 +21,7 @@
 #define CRC_INIT_REG        (*(volatile uint32_t *)(CRC_BASE + 0x10))
 #define CRC_POL_REG         (*(volatile uint32_t *)(CRC_BASE + 0x14))
 
-/* CRC_CR — RM0351 section 15.4.3 */
+/* CRC_CR -- RM0351 section 15.4.3 */
 #define CRC_CR_RESET        (1U << 0)   /* rs: cleared automatically in hardware */
 #define CRC_CR_REV_IN_BYTE  (1U << 5)   /* REV_IN[1:0] = 01 */
 
@@ -61,7 +61,7 @@ void crc32_update(const uint8_t *data, uint32_t len)
      *
      * The peripheral consumes one AHB cycle per byte regardless of
      * access width: 1 cycle for a byte, 4 for a word. Throughput is
-     * therefore identical, and word-wide writes would bring no gain —
+     * therefore identical, and word-wide writes would bring no gain --
      * they would only save loop iterations, negligible compared to
      * the peripheral's own time.
      *

@@ -11,7 +11,7 @@
 #include "protocol_mgr.h"
 
 /*
- * Bootloader — entry point.
+ * Bootloader -- entry point.
  *
  * Boot sequence
  * -------------
@@ -51,7 +51,7 @@
  * other initialisation.
  *
  * Starting it just before the jump would have covered the
- * application but left the bootloader itself unwatched — and it
+ * application but left the bootloader itself unwatched -- and it
  * contains several blocking waits (USART TXE, flash BSY, the receive
  * loop), any of which can hang if a peripheral stops responding. The
  * board would then freeze without the watchdog ever being armed.
@@ -62,8 +62,8 @@
  *
  * In exchange, the bootloader must refresh the watchdog itself while
  * in update mode. The cost is nil: the loop runs thousands of times
- * per second, and the longest blocking operation — a page erase at
- * roughly twenty milliseconds — stays a hundred and fifty times
+ * per second, and the longest blocking operation -- a page erase at
+ * roughly twenty milliseconds -- stays a hundred and fifty times
  * below the three-second timeout.
  */
 
@@ -159,7 +159,7 @@ static void jump_to_application(uint32_t base)
 
        The watchdog is the exception: it cannot be stopped, and that
        is precisely the intent. The application inherits it and must
-       refresh it, or be reset — which is what triggers rollback. */
+       refresh it, or be reset -- which is what triggers rollback. */
     systick_deinit();
 
     NVIC_ICER0 = 0xFFFFFFFFUL;      /* disable every IRQ */
@@ -277,8 +277,8 @@ static void update_mode(uint32_t limit_ms)
 
 int main(void)
 {
-    /* Before anything else: from here on, any hang — in the
-       bootloader or in the application — causes a reset. */
+    /* Before anything else: from here on, any hang -- in the
+       bootloader or in the application -- causes a reset. */
     iwdg_freeze_on_debug();     /* otherwise a breakpoint resets the board */
     iwdg_start(IWDG_TIMEOUT_MS);
 
@@ -367,7 +367,7 @@ int main(void)
             }
 
             /* Only active_slot, the counter and the rejected slot's
-               state change. Both image descriptions stay intact —
+               state change. Both image descriptions stay intact --
                which is the whole point of keeping them separate. */
             metadata_t previous = meta;
             previous.slot[active].state = STATE_EMPTY;

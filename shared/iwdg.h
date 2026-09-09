@@ -17,7 +17,7 @@
  * The window watchdog also detects refreshes that come too *early*,
  * which catches a program looping over a section that happens to
  * contain the refresh call. That is a real failure mode, but the
- * WWDG is clocked from APB and tops out around 50 ms — far too short
+ * WWDG is clocked from APB and tops out around 50 ms -- far too short
  * to cover an application start-up, and it stops if the system clock
  * fails. Since the point here is to survive a firmware that breaks
  * the clock configuration, the IWDG is the correct choice.
@@ -55,8 +55,8 @@
  * below.
  *
  * Three seconds is generous, deliberately so. The two failure modes
- * are not symmetric: too short causes a false positive — a healthy
- * firmware reset in a loop and rolled back for no reason — while too
+ * are not symmetric: too short causes a false positive -- a healthy
+ * firmware reset in a loop and rolled back for no reason -- while too
  * long only delays detection. This system drives no actuator, so a
  * few seconds of undefined behaviour during an update carries no
  * risk. A motor controller would need tens of milliseconds and a
@@ -83,7 +83,7 @@ void iwdg_start(uint32_t timeout_ms);
  * application that loops without doing useful work would still
  * refresh, and the watchdog would see nothing. Detecting *that*
  * requires refreshing only once the system has been checked healthy
- * — see iwdg_feed_if() and the note in the implementation.
+ * -- see iwdg_feed_if() and the note in the implementation.
  */
 void iwdg_feed(void);
 

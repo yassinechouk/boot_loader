@@ -34,7 +34,7 @@
  * context computes CRCs. The UART interrupt reception merely fills
  * a buffer. Adding a critical section in crc32_update() would
  * increase interrupt latency on a loop called hundreds of times
- * per transfer, at the risk of dropping bytes — a real problem
+ * per transfer, at the risk of dropping bytes -- a real problem
  * created to avoid one that does not exist.
  *
  * If a call from an interrupt ever became necessary, this decision

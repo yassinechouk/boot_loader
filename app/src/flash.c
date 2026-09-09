@@ -3,7 +3,7 @@
 #include "metadata.h"
 
 /* ----------------------------------------------------------------
- * Registers — RM0351 section 3.7
+ * Registers -- RM0351 section 3.7
  * ---------------------------------------------------------------- */
 #define FLASH_R_BASE        0x40022000UL
 
@@ -11,11 +11,11 @@
 #define FLASH_SR            (*(volatile uint32_t *)(FLASH_R_BASE + 0x10))
 #define FLASH_CR            (*(volatile uint32_t *)(FLASH_R_BASE + 0x14))
 
-/* Unlock keys — RM0351 section 3.7.3 */
+/* Unlock keys -- RM0351 section 3.7.3 */
 #define FLASH_KEY1          0x45670123UL
 #define FLASH_KEY2          0xCDEF89ABUL
 
-/* FLASH_SR — RM0351 section 3.7.5 */
+/* FLASH_SR -- RM0351 section 3.7.5 */
 #define SR_BSY              (1U << 16)
 #define SR_OPTVERR          (1U << 15)
 #define SR_RDERR            (1U << 14)
@@ -35,7 +35,7 @@
                              SR_PGAERR  | SR_WRPERR | SR_PROGERR | \
                              SR_OPERR)
 
-/* FLASH_CR — RM0351 section 3.7.6 */
+/* FLASH_CR -- RM0351 section 3.7.6 */
 #define CR_LOCK             (1U << 31)
 #define CR_STRT             (1U << 16)
 #define CR_BKER             (1U << 11)
@@ -61,7 +61,7 @@ static void flash_wait_busy(void)
 {
     while (FLASH_SR & SR_BSY) {
         /* busy wait: a page erase takes ~20 ms,
-           a double-word write takes a few tens of µs */
+           a double-word write takes a few tens of us */
     }
 }
 
@@ -224,7 +224,7 @@ flash_status_t flash_write(uint32_t address, const uint8_t *data, uint32_t len)
     for (uint32_t i = 0; i < len; i += 8U) {
         /* Source bytes are not necessarily aligned; reassemble word
            by word rather than dereferencing a potentially misaligned
-           uint32_t* — undefined behavior on Cortex-M. */
+           uint32_t* -- undefined behavior on Cortex-M. */
         uint32_t low  = (uint32_t)data[i]
                       | ((uint32_t)data[i + 1] << 8)
                       | ((uint32_t)data[i + 2] << 16)

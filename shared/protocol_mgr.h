@@ -22,7 +22,7 @@
  * ----------
  * The simulator erases the entire slot at the start of a transfer.
  * On silicon, 480 KB represents 240 pages at roughly twenty
- * milliseconds each, nearly five seconds of unavailability —
+ * milliseconds each, nearly five seconds of unavailability --
  * for a firmware that may occupy only 20 KB.
  *
  * This module therefore erases page by page, just before writing.
@@ -34,7 +34,7 @@
  * ------------------
  * protocol_poll() receives the current time as a parameter rather
  * than depending on a timer. The module remains testable on a PC,
- * and the choice of time source — SysTick, TIM, other — belongs
+ * and the choice of time source -- SysTick, TIM, other -- belongs
  * to the caller.
  */
 

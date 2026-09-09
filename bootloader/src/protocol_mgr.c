@@ -63,7 +63,7 @@ static void send_frame(uint8_t cmd, uint16_t seq,
     header[5] = (uint8_t)(seq & 0xFFU);
     header[6] = (uint8_t)((seq >> 8) & 0xFFU);
 
-    /* The CRC covers CMD, LENGTH, SEQ and DATA — not the MAGIC, which
+    /* The CRC covers CMD, LENGTH, SEQ and DATA -- not the MAGIC, which
        validates itself simply by being recognized. */
     crc32_reset();
     crc32_update(&header[FRAME_OFF_CMD], FRAME_HEADER_SIZE - FRAME_OFF_CMD);
@@ -251,8 +251,8 @@ static void on_data(uint16_t seq, const uint8_t *data, uint16_t len)
     }
 
     /* Retransmission: the PC did not receive the previous ACK. It
-       does not expect a re-write — flash cannot be reprogrammed
-       without erasing — but the missing acknowledgement. Reprocessing
+       does not expect a re-write -- flash cannot be reprogrammed
+       without erasing -- but the missing acknowledgement. Reprocessing
        the frame must have no side effect. */
     if (seq == last_seq) {
         send_ack(seq);

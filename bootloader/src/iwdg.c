@@ -2,7 +2,7 @@
 #include "iwdg.h"
 
 /* ----------------------------------------------------------------
- * Registers — RM0351 section 36.4
+ * Registers -- RM0351 section 36.4
  * ---------------------------------------------------------------- */
 #define IWDG_BASE           0x40003000UL
 
@@ -12,12 +12,12 @@
 #define IWDG_SR             (*(volatile uint32_t *)(IWDG_BASE + 0x0C))
 #define IWDG_WINR           (*(volatile uint32_t *)(IWDG_BASE + 0x10))
 
-/* Key values — RM0351 section 36.4.1 */
+/* Key values -- RM0351 section 36.4.1 */
 #define KEY_RELOAD          0xAAAAU     /* refresh the counter        */
 #define KEY_UNLOCK          0x5555U     /* unlock PR, RLR and WINR    */
 #define KEY_START           0xCCCCU     /* start the watchdog         */
 
-/* IWDG_SR — update-in-progress flags */
+/* IWDG_SR -- update-in-progress flags */
 #define SR_PVU              (1U << 0)   /* prescaler update ongoing   */
 #define SR_RVU              (1U << 1)   /* reload update ongoing      */
 #define SR_WVU              (1U << 2)   /* window update ongoing      */
@@ -34,7 +34,7 @@
 #define LSI_FREQ_HZ         32000UL
 
 /* ----------------------------------------------------------------
- * RCC — reset cause flags, RM0351 section 6.4.29
+ * RCC -- reset cause flags, RM0351 section 6.4.29
  * ---------------------------------------------------------------- */
 #define RCC_BASE            0x40021000UL
 #define RCC_CSR             (*(volatile uint32_t *)(RCC_BASE + 0x94))
@@ -43,7 +43,7 @@
 #define CSR_IWDGRSTF        (1U << 29)  /* independent watchdog reset */
 
 /* ----------------------------------------------------------------
- * DBGMCU — freeze peripherals while halted, RM0351 section 48.9
+ * DBGMCU -- freeze peripherals while halted, RM0351 section 48.9
  * ---------------------------------------------------------------- */
 #define DBGMCU_BASE         0xE0042000UL
 #define DBGMCU_APB1FZR1     (*(volatile uint32_t *)(DBGMCU_BASE + 0x08))
@@ -136,7 +136,7 @@ void iwdg_feed_if(int healthy)
      * An unconditional refresh only proves that execution reaches a
      * particular line. A program stuck in a loop that happens to
      * contain that line keeps the watchdog quiet while doing nothing
-     * useful — the failure the watchdog was meant to catch.
+     * useful -- the failure the watchdog was meant to catch.
      *
      * Refreshing only on a health condition turns a liveness check
      * into a correctness check. Under an RTOS this is typically a
@@ -169,7 +169,7 @@ void iwdg_freeze_on_debug(void)
        while the core is halted.
      *
      * Without it, a breakpoint resets the board a few seconds later
-     * and step-by-step debugging becomes impossible — a failure that
+     * and step-by-step debugging becomes impossible -- a failure that
      * looks like a firmware bug and wastes hours.
      *
      * This is a debug aid. A shipped product should not enable it,

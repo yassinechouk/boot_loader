@@ -4,7 +4,7 @@
 .thumb
 
 /* =========================================================
-   RESET HANDLER — first code executed after reset
+   RESET HANDLER -- first code executed after reset
    ========================================================= */
     .section  .text.Reset_Handler
     .weak     Reset_Handler
@@ -66,7 +66,7 @@ LoopForever:
 
    Every vector table entry must point somewhere. Unimplemented
    ones land here. In debug, a program stuck in Infinite_Loop
-   signals an unhandled interrupt — often a HardFault.
+   signals an unhandled interrupt -- often a HardFault.
    ========================================================= */
     .section  .text.Default_Handler,"ax",%progbits
 
@@ -157,8 +157,8 @@ g_pfnVectors:
    WEAK ALIASES
 
    Each handler points to Default_Handler by default. A STRONG
-   definition of the same name elsewhere in the project — for
-   example USART2_IRQHandler in uart.c — automatically replaces
+   definition of the same name elsewhere in the project -- for
+   example USART2_IRQHandler in uart.c -- automatically replaces
    the alias: the linker always retains the strong definition.
 
    This is what allows implementing a handler without ever

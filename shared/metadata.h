@@ -4,7 +4,7 @@
 #include <stdint.h>
 
 /* =========================================================
- * Flash memory layout — STM32L476RG
+ * Flash memory layout -- STM32L476RG
  *
  * 1 MB of flash, organized in two 512 KB banks,
  * uniform 2 KB pages.
@@ -69,7 +69,7 @@ typedef enum {
  * to the other slot, the metadata retained the size and CRC of
  * the rejected image. The bootloader would then read VALID,
  * recompute the CRC of the fallback slot against the wrong value,
- * observe a mismatch and refuse to boot — even though the board
+ * observe a mismatch and refuse to boot -- even though the board
  * contained a working firmware.
  *
  * The rollback had saved the board once, then immobilised it on

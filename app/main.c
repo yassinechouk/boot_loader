@@ -7,7 +7,7 @@
 #include "iwdg.h"
 
 /*
- * Application — demonstrates the update lifecycle.
+ * Application -- demonstrates the update lifecycle.
  *
  * Self-confirmation
  * -----------------
@@ -23,7 +23,7 @@
  *
  * The application must therefore confirm its own start-up: set the
  * state to VALID and clear the counter. Without that confirmation no
- * rollback is possible — but without it, no firmware survives past
+ * rollback is possible -- but without it, no firmware survives past
  * three boots either.
  *
  * When to confirm
@@ -41,7 +41,7 @@
  * ------------------
  * The bootloader started the IWDG before jumping, and it can no
  * longer be stopped. This application must therefore refresh it, or
- * it will be reset after three seconds — which advances the failure
+ * it will be reset after three seconds -- which advances the failure
  * counter and, after three attempts, triggers rollback.
  *
  * That is the mechanism working as intended: an application that
@@ -79,7 +79,7 @@
 
 
 /* ----------------------------------------------------------------
- * Minimal UART — the application never needs to receive
+ * Minimal UART -- the application never needs to receive
  * ---------------------------------------------------------------- */
 
 static void uart_init(void)
@@ -154,7 +154,7 @@ static uint8_t slot_courant(void)
        slot currently executing.
 
        This introspection lets the application know where it runs
-       without being told — useful to confirm that the right binary
+       without being told -- useful to confirm that the right binary
        reached the right slot. */
     return (SCB_VTOR >= SLOT_B_ADDR) ? SLOT_B : SLOT_A;
 }
@@ -237,7 +237,7 @@ int main(void)
     uint8_t slot = slot_courant();
 
     uart_puts("\r\n########################################\r\n");
-    uart_puts("  APPLICATION — slot ");
+    uart_puts("  APPLICATION -- slot ");
     uart_putc((char)('A' + slot));
     uart_puts("\r\n########################################\r\n");
 
@@ -282,7 +282,7 @@ int main(void)
         /* Conditional refresh: the watchdog is only reassured if the
            cycle counter has genuinely advanced since the last pass.
            The criterion is trivial here, but the shape is the right
-           one — under an RTOS a supervisor task would check in the
+           one -- under an RTOS a supervisor task would check in the
            same way that every other task has made progress. */
         iwdg_feed_if(cycle != dernier_cycle_vu);
         dernier_cycle_vu = cycle;

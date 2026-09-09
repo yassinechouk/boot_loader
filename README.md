@@ -12,15 +12,17 @@ the previous one — automatically, and without host intervention.
 ========================================
   BOOTLOADER v0.1.0
 ========================================
-Slot actif  : A
-Etat        : TESTING
-Taille      : 4288 octets
+Active slot : A
+State       : TESTING
+Size        : 4288 bytes
 Version     : 0x00020000
-Echecs boot : 3
-Repli       : slot B, VALID, 4272 octets
-Seuil d'echecs atteint, rollback
-Retour au slot B
-Saut vers 0x08080000
+Boot fails  : 3
+Fallback    : slot B, VALID, 4272 bytes
+
+Failure threshold reached, rolling back
+Falling back to slot B
+
+Jumping to 0x08080000
 ```
 
 ---
@@ -123,24 +125,29 @@ python3 ../tools/flash.py --port /dev/ttyACM0 --dir . --version 1.0.0
 ```
 
 ```
-Etat de la carte
-  protocole      : v1
+Board status
+  protocol       : v1
   bootloader     : v0.1.0
-  slot actif     : A
-  slot libre     : B
-  etat           : VALID
-  fichier        : app_slotB.bin
+  active firmware: v0.2.0
+  active slot    : A
+  free slot      : B
+  state          : VALID
+  file           : app_slotB.bin
 
-Transfert
-  taille   : 4272 octets
+Transfer
+  size     : 4272 bytes
   CRC32    : 0xE85569D7
-  blocs    : 17 x 256
-  [########################################] 100%  4272/4272 octets
-  transmis en 0.6 s (6593 o/s)
+  blocks   : 17 x 256
+  target   : slot B
+  estimate : 0.6 s
+  [########################################] 100%  4272/4272 bytes
+  transmitted in 0.6 s (6593 B/s)
 
 Verification
-  OK    CRC global verifie
-  OK    image marquee TESTING
+  re-reading flash and computing global CRC...
+  OK    global CRC verified
+  OK    image marked TESTING
+  board rebooting; application must confirm itself
 ```
 
 To inspect the board without transferring anything:
@@ -286,9 +293,10 @@ The result:
 
 ```
 VTOR        : 0x08080000
-Verification de l'image :
-  CRC calcule : 0x74A4F8EC
-  CRC attendu : 0x980C80AA   DIVERGENT
+
+Image verification:
+  computed CRC : 0x74A4F8EC
+  expected CRC : 0x980C80AA   MISMATCH
 ```
 
 The rollback itself succeeded — the board booted the fallback image. But the
@@ -353,9 +361,9 @@ The active slot remained `VALID` and the board booted normally; the target slot
 was left `IN_PROGRESS` and correctly excluded from consideration.
 
 ```
-Slot actif  : B
-Etat        : VALID
-Repli       : slot A, IN_PROGRESS, 102400 octets
+Active slot : B
+State       : VALID
+Fallback    : slot A, IN_PROGRESS, 102400 bytes
 ```
 
 **Wrong binary.** Sending the slot-B image while slot A is free is rejected

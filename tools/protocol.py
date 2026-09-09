@@ -116,7 +116,7 @@ class Incomplete(ProtocolError):
 
 
 # ---------------------------------------------------------------
-# Trame
+# Frame
 # ---------------------------------------------------------------
 @dataclass
 class Frame:
@@ -255,12 +255,12 @@ class StartUpdate:
 @dataclass
 class InfoResponse:
     """
-    Payload de RSP_INFO — 12 octets.
-    Miroir exact de info_response_t dans shared/protocol.h.
+    Payload of RSP_INFO — 12 bytes.
+    Exact mirror of info_response_t in shared/protocol.h.
 
-    active_slot et free_slot sont mutuellement deductibles. Cette
-    redondance est volontaire : la decision "ou ecrire" revient au
-    bootloader, qui detient l'etat reel.
+    active_slot and free_slot are mutually derivable. This redundancy
+    is deliberate: the decision "where to write" belongs to the
+    bootloader, which holds the real state.
     """
     fw_version: int
     bl_version: int
@@ -286,7 +286,7 @@ class InfoResponse:
     def unpack(cls, data: bytes) -> "InfoResponse":
         expected = struct.calcsize(cls.FORMAT)
         if len(data) != expected:
-            raise BadLength(f"RSP_INFO fait {expected} octets, recu {len(data)}")
+            raise BadLength(f"RSP_INFO is {expected} bytes, got {len(data)}")
         return cls(*struct.unpack(cls.FORMAT, data))
 
     def __repr__(self) -> str:
@@ -300,7 +300,7 @@ class InfoResponse:
 
 
 # ---------------------------------------------------------------
-# Utilitaires
+# Utilities
 # ---------------------------------------------------------------
 def split_firmware(data: bytes, block: int = DATA_BLOCK_SIZE):
     """Split a binary into blocks. The last one may be shorter."""
@@ -314,12 +314,12 @@ def frame_count(fw_size: int, block: int = DATA_BLOCK_SIZE) -> int:
 
 
 if __name__ == "__main__":
-    print("Tailles des structures :")
-    print(f"  StartUpdate  : {struct.calcsize(StartUpdate.FORMAT):2} octets (attendu 16)")
-    print(f"  InfoResponse : {struct.calcsize(InfoResponse.FORMAT):2} octets (attendu 12)")
+    print("Structure sizes:")
+    print(f"  StartUpdate  : {struct.calcsize(StartUpdate.FORMAT):2} bytes (expected 16)")
+    print(f"  InfoResponse : {struct.calcsize(InfoResponse.FORMAT):2} bytes (expected 12)")
 
     f = Frame(cmd=CMD_DATA, seq=42, data=bytes(range(16)))
     raw = encode(f)
-    print(f"\nTrame encodee ({len(raw)} octets) :")
+    print(f"\nEncoded frame ({len(raw)} bytes):")
     print(f"  {raw.hex(' ')}")
-    print(f"\nRelue : {decode(raw)}")
+    print(f"\nDecoded back: {decode(raw)}")

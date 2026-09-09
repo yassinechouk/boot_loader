@@ -19,7 +19,7 @@
  *   7       N     DATA
  *   7+N     4     CRC32   (little-endian)
  *
- * The CRC covers CMD, LENGTH, SEQ and DATA — not the MAGIC,
+ * The CRC covers CMD, LENGTH, SEQ and DATA -- not the MAGIC,
  * which validates itself simply by being recognized.
  * ========================================================= */
 #define FRAME_MAGIC_0           0xAAU

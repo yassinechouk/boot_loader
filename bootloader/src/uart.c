@@ -2,7 +2,7 @@
 #include "uart.h"
 
 /* ----------------------------------------------------------------
- * Addresses — RM0351 section 2.2.2
+ * Addresses -- RM0351 section 2.2.2
  * ---------------------------------------------------------------- */
 #define RCC_BASE            0x40021000UL
 #define GPIOA_BASE          0x48000000UL
@@ -25,13 +25,13 @@
 #define USART2_RDR          (*(volatile uint32_t *)(USART2_BASE + 0x24))
 #define USART2_TDR          (*(volatile uint32_t *)(USART2_BASE + 0x28))
 
-/* USART_CR1 — RM0351 section 40.8.1 */
+/* USART_CR1 -- RM0351 section 40.8.1 */
 #define CR1_UE              (1U << 0)
 #define CR1_RE              (1U << 2)
 #define CR1_TE              (1U << 3)
 #define CR1_RXNEIE          (1U << 5)
 
-/* USART_ISR — RM0351 section 40.8.8 */
+/* USART_ISR -- RM0351 section 40.8.8 */
 #define ISR_PE              (1U << 0)
 #define ISR_FE              (1U << 1)
 #define ISR_NE              (1U << 2)
@@ -40,7 +40,7 @@
 #define ISR_TC              (1U << 6)
 #define ISR_TXE             (1U << 7)
 
-/* USART_ICR — flag clear register, write 1 to clear */
+/* USART_ICR -- flag clear register, write 1 to clear */
 #define ICR_PECF            (1U << 0)
 #define ICR_FECF            (1U << 1)
 #define ICR_NECF            (1U << 2)
@@ -105,7 +105,7 @@ void uart_init(uint32_t baudrate)
 
     /* Oversampling by 16 (default): BRR = f_ck / baudrate.
        At 4 MHz and 115200 baud, this gives 34, yielding 117647 baud
-       actual — 2.1% error, within UART tolerance. */
+       actual -- 2.1% error, within UART tolerance. */
     USART2_BRR = SYSTEM_CLOCK_HZ / baudrate;
 
     rx_head = 0;
@@ -139,7 +139,7 @@ void USART2_IRQHandler(void)
      * ORE is the most severe: until it is explicitly cleared,
      * the USART STOPS receiving. A driver that ignores it goes deaf
      * after the first overrun, with no visible symptom on the
-     * firmware side — the PC simply sees its frames go unanswered. */
+     * firmware side -- the PC simply sees its frames go unanswered. */
     if (status & (ISR_ORE | ISR_FE | ISR_NE | ISR_PE)) {
 
         if (status & ISR_ORE) {

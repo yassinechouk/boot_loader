@@ -2,7 +2,7 @@
 #include "systick.h"
 
 /* ----------------------------------------------------------------
- * SysTick registers — defined by ARM, identical on all Cortex-M.
+ * SysTick registers -- defined by ARM, identical on all Cortex-M.
  * Fixed addresses in the System Control Block space.
  * ---------------------------------------------------------------- */
 #define SYST_CSR    (*(volatile uint32_t *)0xE000E010UL)  /* control  */
