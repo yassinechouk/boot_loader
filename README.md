@@ -5,24 +5,26 @@ without HAL, CubeMX or any vendor abstraction layer.
 
 The board receives a new firmware over UART, verifies it at three independent
 levels, installs it into a spare flash slot, and boots it on trial. If the new
-image fails to confirm that it started correctly, the bootloader rolls back to
-the previous one — automatically, and without host intervention.
+image fails to confirm that it started correctly, an independent watchdog
+resets the board and the bootloader rolls back to the previous image —
+automatically, with no host involvement and no button press.
 
 ```
 ========================================
   BOOTLOADER v0.1.0
 ========================================
-Active slot : A
+Reset caused by the watchdog
+Active slot : B
 State       : TESTING
-Size        : 4288 bytes
-Version     : 0x00020000
+Size        : 4472 bytes
+Version     : 0x00040000
 Boot fails  : 3
-Fallback    : slot B, VALID, 4272 bytes
+Fallback    : slot A, VALID, 4344 bytes
 
 Failure threshold reached, rolling back
-Falling back to slot B
+Falling back to slot A
 
-Jumping to 0x08080000
+Jumping to 0x08008000
 ```
 
 ---
@@ -53,6 +55,8 @@ table, runtime flash programming, and designing for interrupted operations.
   down
 - Persists its state across power loss in duplicated, CRC-protected flash pages
 - Boots a new image on trial and rolls back if the application does not confirm
+- Uses an independent watchdog so a hung application is detected without human
+  intervention
 - Survives power loss at any point in the transfer
 
 Everything is written directly against the hardware registers. No HAL, no
@@ -76,7 +80,7 @@ is required.
 
 ```
 0x08000000  ┌──────────────────┐
-            │    BOOTLOADER    │   32 KB   (8.7 KB used)
+            │    BOOTLOADER    │   32 KB   (9.1 KB used)
 0x08008000  ├──────────────────┤
             │      SLOT A      │  480 KB
 0x08080000  ├──────────────────┤
@@ -104,15 +108,15 @@ pip install pyserial --break-system-packages
 ```bash
 cd bootloader
 make
-make flash
+make flash          # over SWD — the only way to install the bootloader
 ```
 
 ### Build the application
 
 ```bash
 cd app
-make            # produces app_slotA.bin and app_slotB.bin
-make verify     # confirms each is linked to its own address
+make                # produces app_slotA.bin and app_slotB.bin
+make verify         # confirms each is linked to its own address
 ```
 
 ### Update over UART
@@ -128,27 +132,26 @@ python3 ../tools/flash.py --port /dev/ttyACM0 --dir . --version 1.0.0
 Board status
   protocol       : v1
   bootloader     : v0.1.0
-  active firmware: v0.2.0
   active slot    : A
   free slot      : B
   state          : VALID
   file           : app_slotB.bin
 
 Transfer
-  size     : 4272 bytes
-  CRC32    : 0xE85569D7
+  size     : 4296 bytes
+  CRC32    : 0xA7B5340A
   blocks   : 17 x 256
   target   : slot B
-  estimate : 0.6 s
-  [########################################] 100%  4272/4272 bytes
-  transmitted in 0.6 s (6593 B/s)
+  [########################################] 100%  4296/4296 bytes
+  transmitted in 0.7 s (6579 B/s)
 
 Verification
-  re-reading flash and computing global CRC...
   OK    global CRC verified
   OK    image marked TESTING
-  board rebooting; application must confirm itself
 ```
+
+The host never chooses the target slot. It asks the board which slot is free
+and sends the matching binary.
 
 To inspect the board without transferring anything:
 
@@ -180,7 +183,22 @@ A compiled binary is bound to a link address. Function calls and global
 variable references are resolved at link time, so an image built for
 `0x08008000` will not run at `0x08080000`.
 
-Three ways around this were considered:
+The effect is visible in the first sixteen bytes of each image, dumped straight
+from flash:
+
+```
+slot A:  0080 0120  2186 0008  6986 0008  6986 0008
+slot B:  0080 0120  2106 0808  6906 0808  6906 0808
+         └────────┘ └────────┘
+         stack ptr  reset handler
+         identical  0x08008621 vs 0x08080621
+```
+
+Same source, same RAM, but every flash address shifted by 0x78000 — exactly the
+480 KB between the two slots. The trailing `1` on each handler address is the
+Thumb bit; without it the jump raises an immediate HardFault.
+
+Three alternatives were considered:
 
 | Approach | Verdict |
 |---|---|
@@ -221,7 +239,44 @@ increments a failure counter, then jumps to it. The application must write
 never does, the counter reaches its threshold and the bootloader falls back.
 
 The counter is incremented **before** the jump. Incrementing it afterwards
-would have no effect — the jump never returns.
+would have no effect, since the jump never returns.
+
+### Why the watchdog starts in the bootloader
+
+Rollback depends on a failing application causing a reset. Without a watchdog,
+an application that hangs simply hangs — the board freezes, the failure counter
+never advances, and the fallback never happens. Early testing required pressing
+the reset button by hand three times, which is not a mechanism.
+
+The IWDG closes that gap. It is clocked by the LSI, an oscillator independent
+of the system clock, so it keeps counting even if a broken firmware destroys
+the clock configuration.
+
+It is started on the **first line of the bootloader's main()**, not by the
+application. Starting it from the application would leave a blind spot: a crash
+inside `startup.s`, or a HardFault on the very first instruction, would never
+be detected. Starting it just before the jump would leave the bootloader itself
+unwatched, and it contains several blocking waits — USART TXE, flash BSY, the
+receive loop — any of which can hang if a peripheral stops responding.
+
+Surveillance must begin before the thing it watches.
+
+Since the IWDG cannot be stopped once running, the bootloader refreshes it
+during update mode. The cost is nil: the receive loop runs thousands of times
+per second, and the longest blocking operation — a page erase at roughly 20 ms
+— stays a hundred and fifty times below the three-second timeout.
+
+The application refreshes it **conditionally**, on the application cycle having
+advanced. An unconditional refresh would only catch a complete hang: a program
+looping over a section that happens to contain the refresh call would keep the
+watchdog quiet while doing nothing useful.
+
+The three-second timeout is deliberately generous. The two failure modes are
+not symmetric: too short causes a false positive — a healthy firmware reset in
+a loop and rolled back for no reason — while too long only delays detection.
+This system drives no actuator, so a few seconds of undefined behaviour during
+an update carries no risk. With the LSI specified at ±5 %, the real timeout
+lies between 2.86 s and 3.16 s.
 
 ### Why duplicated metadata pages
 
@@ -292,8 +347,7 @@ changed `active_slot`, and wrote it back.
 The result:
 
 ```
-VTOR        : 0x08080000
-
+VTOR         : 0x08080000
 Image verification:
   computed CRC : 0x74A4F8EC
   expected CRC : 0x980C80AA   MISMATCH
@@ -326,7 +380,7 @@ exactly one 8-byte write.
 
 ```bash
 cd tools
-python3 test_protocol.py     # 47 tests: framing, sequencing, error paths
+python3 test_protocol.py     # 64 tests: framing, sequencing, error paths
 python3 bootloader_sim.py    # full transfer against the simulator
 python3 debug_gui.py         # step-through visualisation with fault injection
 ```
@@ -346,15 +400,40 @@ python3 debug_gui.py         # step-through visualisation with fault injection
 | Flash driver | 10 tests including all five rejection paths |
 | Metadata manager | 25 tests, persistence verified across bootloader reflash |
 | UART | sustained burst at 115200 baud, zero bytes lost, buffer reaching 511/511 |
+| IWDG | timeout measured, debug freeze verified, reset cause reported |
 
 ### Robustness scenarios
 
 Each was performed on hardware and produced the expected behaviour.
 
-**Rollback after repeated failure.** An application that never confirms is
-retried three times, then the bootloader switches back. The fallback image
-boots with a matching CRC on the following reset — the specific case that
-exposed the design flaw above.
+**Autonomous rollback.** An application built to hang after two cycles was
+installed. With no human intervention, the watchdog reset the board three
+times, the failure counter advanced on each attempt, and the bootloader
+switched back to the previous slot — the whole sequence taking about twenty
+seconds.
+
+```
+cycle 1
+cycle 2
+
+*** DELIBERATE HANG ***
+The watchdog will no longer be refreshed.
+Reset expected in ~3 s.
+
+[silence, then]
+
+========================================
+  BOOTLOADER v0.1.0
+========================================
+Reset caused by the watchdog
+State       : TESTING
+Boot fails  : 3
+Failure threshold reached, rolling back
+Falling back to slot A
+```
+
+On the following reset the fallback image booted with a matching CRC — the
+specific case that exposed the design flaw described above.
 
 **Power loss mid-transfer.** The cable was pulled at 51 % of a 100 KB transfer.
 The active slot remained `VALID` and the board booted normally; the target slot
@@ -374,6 +453,11 @@ bootloader's `ERR_SLOT`.
 NACKs and the host retransmits. Reprocessing is harmless because frame handling
 is idempotent.
 
+**Slot alternation.** Two consecutive updates were sent without specifying a
+target. The board directed the first to slot B and the second to slot A,
+choosing from its own metadata rather than any host-side counter. Dumping both
+slots afterwards confirmed two distinct images in flash.
+
 ---
 
 ## Repository layout
@@ -389,7 +473,8 @@ is idempotent.
 │       ├── metadata_mgr.c  dual-page persistent state
 │       ├── protocol_mgr.c  frame assembly and command dispatch
 │       ├── uart.c          interrupt-driven RX, ring buffer
-│       └── systick.c       millisecond time base
+│       ├── systick.c       millisecond time base
+│       └── iwdg.c          independent watchdog
 │
 ├── app/
 │   ├── main.c              demo application with self-confirmation
@@ -428,16 +513,17 @@ boot, or an application command that reboots into the bootloader.
 **Dual binaries.** The host must hold two images per firmware version. Hardware
 with true bank remapping could use one.
 
-**No watchdog yet.** Rollback currently relies on the application crashing
-badly enough to reset the board. An independent watchdog would make the failure
-detection reliable rather than incidental.
+**The bootloader cannot update itself.** Fixing a bug in it requires SWD access
+or the ST ROM bootloader via the BOOT0 pin. A two-stage design — a small
+immutable first stage able to replace the second — would lift this, at a
+complexity cost not justified here.
 
 ---
 
 ## Planned work
 
-- Independent watchdog (IWDG) driving the failure path
-- FreeRTOS in the application layer
+- FreeRTOS in the application layer, with a supervisor task driving the
+  conditional watchdog refresh
 - CAN as a second transport, exercising the protocol's transport independence
 - Firmware signature verification
 
@@ -445,10 +531,10 @@ detection reliable rather than incidental.
 
 ## References
 
-- **RM0351** — STM32L4x5/L4x6 reference manual (flash, CRC, USART, boot)
+- **RM0351** — STM32L4x5/L4x6 reference manual (flash, CRC, USART, IWDG, boot)
 - **UM1724** — STM32 Nucleo-64 boards user manual (pinout, ST-LINK, solder
   bridges)
-- **DS10198** — STM32L476xx datasheet (alternate function mapping)
+- **DS10198** — STM32L476xx datasheet (alternate function mapping, LSI accuracy)
 - **MCUboot** — reference implementation studied for comparison
 
 ---
