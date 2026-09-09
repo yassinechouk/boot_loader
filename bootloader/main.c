@@ -11,73 +11,69 @@
 #include "protocol_mgr.h"
 
 /*
- * Bootloader — point d'entree.
+ * Bootloader — entry point.
  *
- * Sequence de demarrage
+ * Boot sequence
+ * -------------
+ *   1. Initialise peripherals
+ *   2. Read metadata
+ *   3. Decide: jump to the application, or wait for an update
+ *   4. If an update is requested, handle it then restart
+ *
+ * Step 3 depends on the recorded state:
+ *
+ *   No metadata     -> update mode: nothing to run
+ *   EMPTY           -> update mode
+ *   IN_PROGRESS     -> update mode: a transfer was interrupted and
+ *                      the target slot holds a partial image
+ *   VALID           -> jump immediately
+ *   TESTING         -> jump, after incrementing the failure counter.
+ *                      Past the threshold, roll back to the other slot.
+ *
+ * The TESTING mechanism
  * ---------------------
- *   1. Initialiser les peripheriques
- *   2. Lire les metadonnees
- *   3. Decider : sauter vers l'application, ou attendre une mise a jour
- *   4. Si mise a jour demandee, la traiter puis redemarrer
+ * A correct CRC proves an image's integrity, not its correctness: a
+ * firmware transmitted without a single corrupted bit can still
+ * crash within its first second.
  *
- * La decision de l'etape 3 depend de l'etat enregistre :
+ * The bootloader therefore jumps to a TESTING image after
+ * incrementing the failure counter. If the application starts
+ * correctly it must clear that counter and set the state to VALID.
+ * If it crashes, the watchdog forces a reset with the counter
+ * untouched; past the threshold the bootloader switches back.
  *
- *   Aucune metadonnee   -> mode reception : rien a executer
- *   EMPTY               -> mode reception
- *   IN_PROGRESS         -> mode reception : un transfert a ete
- *                          interrompu, le slot cible contient une
- *                          image partielle
- *   VALID               -> saut immediat
- *   TESTING             -> saut, apres incrementation du compteur
- *                          d'echecs. Si le seuil est atteint,
- *                          rollback vers l'autre slot.
- *
- * Le mecanisme TESTING
- * --------------------
- * Un CRC correct prouve l'integrite d'une image, pas son bon
- * fonctionnement : un firmware transmis sans la moindre corruption
- * peut planter des sa premiere seconde.
- *
- * Le bootloader saute donc vers une image en TESTING apres avoir
- * incremente son compteur d'echecs. L'application, si elle demarre
- * correctement, doit remettre ce compteur a zero et passer l'etat a
- * VALID. Si elle plante, le watchdog provoque un reset et le
- * compteur n'a pas ete remis a zero : au-dela du seuil, le
- * bootloader bascule sur le slot precedent.
- *
- * L'application porte donc une responsabilite. Sans sa confirmation,
- * le rollback est impossible.
+ * The application thus carries a responsibility. Without its
+ * confirmation, no rollback is possible.
  *
  * Watchdog
  * --------
- * L'IWDG est demarre des la premiere ligne de main(), avant toute
- * autre initialisation.
+ * The IWDG is started on the very first line of main(), before any
+ * other initialisation.
  *
- * Le demarrer juste avant le saut aurait couvert l'application mais
- * laisse le bootloader lui-meme sans surveillance. Or il contient
- * plusieurs attentes bloquantes — TXE de l'USART, BSY de la flash,
- * la boucle de reception — dont chacune peut se figer si un
- * peripherique cesse de repondre. La carte resterait alors bloquee
- * sans que le watchdog ait seulement ete active.
+ * Starting it just before the jump would have covered the
+ * application but left the bootloader itself unwatched — and it
+ * contains several blocking waits (USART TXE, flash BSY, the receive
+ * loop), any of which can hang if a peripheral stops responding. The
+ * board would then freeze without the watchdog ever being armed.
  *
- * C'est le meme raisonnement qui interdit de le demarrer depuis le
- * main() de l'application : la surveillance doit commencer avant ce
- * qu'elle surveille.
+ * It is the same reasoning that forbids starting it from the
+ * application's main(): surveillance must begin before the thing it
+ * watches.
  *
- * En contrepartie, le bootloader doit se nourrir lui-meme pendant
- * le mode reception. Le cout est nul : la boucle tourne des milliers
- * de fois par seconde, et l'operation bloquante la plus longue —
- * l'effacement d'une page, une vingtaine de millisecondes — reste
- * cent cinquante fois inferieure au delai de trois secondes.
+ * In exchange, the bootloader must refresh the watchdog itself while
+ * in update mode. The cost is nil: the loop runs thousands of times
+ * per second, and the longest blocking operation — a page erase at
+ * roughly twenty milliseconds — stays a hundred and fifty times
+ * below the three-second timeout.
  */
 
-#define BOOT_WAIT_MS        2000U   /* fenetre d'attente au demarrage */
+#define BOOT_WAIT_MS        2000U   /* listen window after reset */
 #define MSI_DEFAULT_HZ      4000000UL
 
 #define SCB_VTOR            (*(volatile uint32_t *)0xE000ED08UL)
 
-/* Registres RCC, necessaires pour rendre les peripheriques a l'etat
-   de reset avant de ceder la main. */
+/* RCC registers, needed to return peripherals close to their reset
+   state before handing over. */
 #define RCC_BASE            0x40021000UL
 #define RCC_AHB1ENR         (*(volatile uint32_t *)(RCC_BASE + 0x48))
 #define RCC_AHB2ENR         (*(volatile uint32_t *)(RCC_BASE + 0x4C))
@@ -90,7 +86,7 @@
 
 
 /* ----------------------------------------------------------------
- * Journalisation
+ * Logging
  * ---------------------------------------------------------------- */
 
 static void log_state(uint8_t s)
@@ -106,7 +102,7 @@ static void log_state(uint8_t s)
 
 
 /* ----------------------------------------------------------------
- * Saut vers l'application
+ * Jump to the application
  * ---------------------------------------------------------------- */
 
 static int slot_looks_bootable(uint32_t base)
@@ -114,13 +110,13 @@ static int slot_looks_bootable(uint32_t base)
     uint32_t sp    = *(volatile uint32_t *)base;
     uint32_t reset = *(volatile uint32_t *)(base + 4U);
 
-    /* Le premier mot est le stack pointer initial : il doit designer
-       une adresse en RAM. Le second est l'adresse du reset handler,
-       qui doit tomber dans la flash.
+    /* The first word is the initial stack pointer: it must point
+       into RAM. The second is the reset handler address, which must
+       fall inside flash.
 
-       Une image absente laisse 0xFFFFFFFF dans les deux, ce que ces
-       tests rejettent. Sauter sur une image inexistante provoquerait
-       un HardFault silencieux, sans aucun message. */
+       A missing image leaves 0xFFFFFFFF in both, which these checks
+       reject. Jumping to a non-existent image would raise a silent
+       HardFault with no message at all. */
     if ((sp & 0xFFF00000UL) != 0x20000000UL) {
         return 0;
     }
@@ -129,9 +125,9 @@ static int slot_looks_bootable(uint32_t base)
         return 0;
     }
 
-    /* Le bit 0 doit valoir 1 : les Cortex-M n'executent que du Thumb,
-       et ce bit le signale au processeur. Une adresse paire
-       provoquerait un HardFault immediat. */
+    /* Bit 0 must be set: Cortex-M cores only execute Thumb, and this
+       bit tells the processor so. An even address would raise an
+       immediate HardFault. */
     if ((reset & 1U) == 0U) {
         return 0;
     }
@@ -145,61 +141,60 @@ static void jump_to_application(uint32_t base)
     uint32_t app_sp    = *(volatile uint32_t *)base;
     uint32_t app_reset = *(volatile uint32_t *)(base + 4U);
 
-    uart_puts("\r\nSaut vers ");
+    uart_puts("\r\nJumping to ");
     uart_hex32(base);
     uart_puts("\r\n\r\n");
     uart_flush();
 
-    /* Dernier nourrissage : l'application dispose ainsi du delai
-       complet pour s'initialiser et atteindre son premier appel. */
+    /* Final refresh: the application then gets the full timeout to
+       initialise and reach its own first refresh. */
     iwdg_feed();
 
     __asm__ volatile ("cpsid i");
 
-    /* Rendre les peripheriques a un etat proche du reset.
-       L'application les reconfigurera, mais elle part du principe
-       qu'ils sont vierges : un USART deja actif ou une interruption
-       encore armee produirait des comportements inexplicables.
-    
-       Le watchdog fait exception : il ne peut pas etre arrete, et
-       c'est precisement ce qu'on veut. L'application en herite et
-       doit le nourrir, sans quoi elle sera resetee — ce qui
-       declenchera le rollback. */
+    /* Return peripherals close to their reset state. The application
+       will reconfigure them, but it assumes they start clean: an
+       already-enabled USART or a still-armed interrupt would produce
+       behaviour that looks inexplicable.
+
+       The watchdog is the exception: it cannot be stopped, and that
+       is precisely the intent. The application inherits it and must
+       refresh it, or be reset — which is what triggers rollback. */
     systick_deinit();
 
-    NVIC_ICER0 = 0xFFFFFFFFUL;      /* desarmer toutes les IRQ */
+    NVIC_ICER0 = 0xFFFFFFFFUL;      /* disable every IRQ */
     NVIC_ICER1 = 0xFFFFFFFFUL;
-    NVIC_ICPR0 = 0xFFFFFFFFUL;      /* effacer celles en attente */
+    NVIC_ICPR0 = 0xFFFFFFFFUL;      /* clear pending ones */
     NVIC_ICPR1 = 0xFFFFFFFFUL;
 
     RCC_APB1ENR1 &= ~(1U << 17);    /* USART2 */
     RCC_AHB1ENR  &= ~(1U << 12);    /* CRC    */
 
-    /* Deplacer la table des vecteurs. Sans cette ligne l'application
-       demarre, puis plante a sa premiere interruption : le processeur
-       chercherait le handler dans la table du bootloader. */
+    /* Relocate the vector table. Without this the application starts,
+       then crashes on its first interrupt: the processor would look
+       for the handler in the bootloader's table. */
     SCB_VTOR = base;
 
     __asm__ volatile ("dsb");
     __asm__ volatile ("isb");
 
-    /* Charger le stack pointer de l'application avant de sauter.
-       Celui du bootloader n'a plus de sens de l'autre cote. */
+    /* Load the application's stack pointer before jumping. The
+       bootloader's own has no meaning on the other side. */
     __asm__ volatile ("msr msp, %0" : : "r" (app_sp) : );
 
     __asm__ volatile ("cpsie i");
 
-    /* Le saut lui-meme. La fonction ne revient jamais. */
+    /* The jump itself. This never returns. */
     ((void (*)(void))app_reset)();
 
-    /* Inatteignable */
+    /* Unreachable */
     while (1) {
     }
 }
 
 
 /* ----------------------------------------------------------------
- * Verification d'une image avant execution
+ * Verifying an image before running it
  * ---------------------------------------------------------------- */
 
 static int image_is_intact(const metadata_t *meta, uint8_t slot)
@@ -216,9 +211,8 @@ static int image_is_intact(const metadata_t *meta, uint8_t slot)
         return 0;
     }
 
-    /* Recalcul du CRC a chaque demarrage. Une cellule flash peut se
-       degrader avec le temps ; mieux vaut le decouvrir ici que
-       d'executer du code corrompu. */
+    /* CRC recomputed on every boot. A flash cell can degrade over
+       time; better to find out here than to execute corrupted code. */
     uint32_t calcule = crc32_compute((const uint8_t *)base, info->size);
 
     return (calcule == info->crc32);
@@ -226,52 +220,51 @@ static int image_is_intact(const metadata_t *meta, uint8_t slot)
 
 
 /* ----------------------------------------------------------------
- * Mode reception
+ * Update mode
  * ---------------------------------------------------------------- */
 
-static void update_mode(uint32_t limite_ms)
+static void update_mode(uint32_t limit_ms)
 {
-    uart_puts("Mode reception");
-    if (limite_ms > 0U) {
+    uart_puts("Update mode");
+    if (limit_ms > 0U) {
         uart_puts(" (");
-        uart_dec(limite_ms);
+        uart_dec(limit_ms);
         uart_puts(" ms)");
     }
     uart_puts("\r\n");
 
-    uint32_t depart = millis();
+    uint32_t start = millis();
 
     while (1) {
-        /* Nourrissage inconditionnel ici : le bootloader n'a pas de
-           notion d'etat sain a verifier, il traite ce qui arrive.
-           C'est l'application qui devra conditionner son propre
-           nourrissage. */
+        /* Unconditional refresh here: the bootloader has no notion of
+           a healthy state to check, it simply handles what arrives.
+           Conditioning the refresh is the application's job. */
         iwdg_feed();
 
-        uint32_t maintenant = millis();
+        uint32_t now = millis();
 
-        protocol_poll(maintenant);
+        protocol_poll(now);
 
         if (protocol_update_complete()) {
-            uart_puts("\r\nMise a jour terminee, redemarrage\r\n");
+            uart_puts("\r\nUpdate complete, restarting\r\n");
             uart_flush();
             delay_ms(50);
 
-            /* Reset logiciel via AIRCR. Repartir du debut garantit un
-               etat propre plutot que de sauter depuis un bootloader
-               dont les peripheriques sont deja configures. */
+            /* Software reset via AIRCR. Starting over guarantees a
+               clean state rather than jumping from a bootloader whose
+               peripherals are already configured. */
             *(volatile uint32_t *)0xE000ED0CUL = 0x05FA0004UL;
 
             while (1) {
             }
         }
 
-        /* Une fenetre d'attente n'expire que si rien n'a commence :
-           un transfert en cours ne doit pas etre interrompu par le
-           delai de demarrage. */
-        if (limite_ms > 0U &&
+        /* The listen window only expires if nothing has started: a
+           transfer in progress must not be cut short by the boot
+           timeout. */
+        if (limit_ms > 0U &&
             protocol_get_state() == PROTO_IDLE &&
-            (maintenant - depart) > limite_ms) {
+            (now - start) > limit_ms) {
             return;
         }
     }
@@ -279,20 +272,19 @@ static void update_mode(uint32_t limite_ms)
 
 
 /* ----------------------------------------------------------------
- * Point d'entree
+ * Entry point
  * ---------------------------------------------------------------- */
 
 int main(void)
 {
-    /* Avant toute autre initialisation : a partir d'ici, tout blocage
-       du bootloader comme de l'application provoque un reset. */
-    iwdg_freeze_on_debug();     /* sinon un breakpoint reset la carte */
+    /* Before anything else: from here on, any hang — in the
+       bootloader or in the application — causes a reset. */
+    iwdg_freeze_on_debug();     /* otherwise a breakpoint resets the board */
     iwdg_start(IWDG_TIMEOUT_MS);
 
-    /* La cause du dernier reset est lue avant d'etre effacee : elle
-       distingue une application qui a plante d'un appui volontaire
-       sur le bouton. */
-    int reset_par_watchdog = iwdg_caused_last_reset();
+    /* The last reset cause is read before being cleared: it tells a
+       crashed application apart from a deliberate button press. */
+    int reset_by_watchdog = iwdg_caused_last_reset();
     iwdg_clear_reset_flags();
 
     systick_init(MSI_DEFAULT_HZ);
@@ -309,124 +301,123 @@ int main(void)
     uart_dec(BOOTLOADER_VERSION & 0xFFU);
     uart_puts("\r\n========================================\r\n");
 
-    if (reset_par_watchdog) {
-        uart_puts("Reset provoque par le watchdog\r\n");
+    if (reset_by_watchdog) {
+        uart_puts("Reset caused by the watchdog\r\n");
     }
 
     metadata_t meta;
 
     if (!metadata_read(&meta)) {
-        uart_puts("Aucune metadonnee valide\r\n");
-        update_mode(0);             /* attente sans limite */
+        uart_puts("No valid metadata\r\n");
+        update_mode(0);             /* wait indefinitely */
         while (1) { }
     }
 
-    uint8_t actif = meta.active_slot;
+    uint8_t active = meta.active_slot;
 
-    uart_puts("Slot actif  : ");
-    uart_putc((char)('A' + actif));
-    uart_puts("\r\nEtat        : ");
-    log_state(meta.slot[actif].state);
-    uart_puts("\r\nTaille      : ");
-    uart_dec(meta.slot[actif].size);
-    uart_puts(" octets\r\nVersion     : ");
-    uart_hex32(meta.slot[actif].version);
-    uart_puts("\r\nEchecs boot : ");
+    uart_puts("Active slot : ");
+    uart_putc((char)('A' + active));
+    uart_puts("\r\nState       : ");
+    log_state(meta.slot[active].state);
+    uart_puts("\r\nSize        : ");
+    uart_dec(meta.slot[active].size);
+    uart_puts(" bytes\r\nVersion     : ");
+    uart_hex32(meta.slot[active].version);
+    uart_puts("\r\nBoot fails  : ");
     uart_dec(meta.boot_fail_count);
     uart_puts("\r\n");
 
-    /* L'autre slot est affiche aussi : c'est lui qui servira de repli
-       en cas de rollback, et savoir ce qu'il contient evite de
-       decouvrir trop tard qu'il est vide. */
-    uint8_t autre_slot = OTHER_SLOT(actif);
-    uart_puts("Repli       : slot ");
-    uart_putc((char)('A' + autre_slot));
+    /* The other slot is shown too: it is the fallback in case of
+       rollback, and knowing what it holds avoids discovering too late
+       that it is empty. */
+    uint8_t other_slot = OTHER_SLOT(active);
+    uart_puts("Fallback    : slot ");
+    uart_putc((char)('A' + other_slot));
     uart_puts(", ");
-    log_state(meta.slot[autre_slot].state);
+    log_state(meta.slot[other_slot].state);
     uart_puts(", ");
-    uart_dec(meta.slot[autre_slot].size);
-    uart_puts(" octets\r\n\r\n");
+    uart_dec(meta.slot[other_slot].size);
+    uart_puts(" bytes\r\n\r\n");
 
-    switch (meta.slot[actif].state) {
+    switch (meta.slot[active].state) {
 
     case STATE_VALID:
-        if (image_is_intact(&meta, actif)) {
-            update_mode(BOOT_WAIT_MS);   /* laisser une chance au PC */
-            jump_to_application(SLOT_ADDR(actif));
+        if (image_is_intact(&meta, active)) {
+            update_mode(BOOT_WAIT_MS);   /* give the host a chance */
+            jump_to_application(SLOT_ADDR(active));
         }
-        uart_puts("Image invalide malgre l'etat VALID\r\n");
+        uart_puts("Image invalid despite VALID state\r\n");
         break;
 
     case STATE_TESTING:
         if (meta.boot_fail_count >= MAX_BOOT_FAILURES) {
-            /* L'application n'a jamais confirme son bon
-               fonctionnement. On revient au slot precedent. */
-            uart_puts("Seuil d'echecs atteint, rollback\r\n");
+            /* The application never confirmed itself. Fall back to
+               the previous slot. */
+            uart_puts("Failure threshold reached, rolling back\r\n");
 
-            uint8_t autre = OTHER_SLOT(actif);
+            uint8_t other = OTHER_SLOT(active);
 
-            /* Verifier le repli AVANT de basculer : rejeter l'image
-               courante pour se retrouver sans rien serait pire que
-               de continuer a l'essayer. */
-            if (meta.slot[autre].state == STATE_EMPTY ||
-                !image_is_intact(&meta, autre)) {
-                uart_puts("Aucune image de repli exploitable\r\n");
+            /* Check the fallback BEFORE switching: rejecting the
+               current image only to find nothing behind it would be
+               worse than continuing to retry. */
+            if (meta.slot[other].state == STATE_EMPTY ||
+                !image_is_intact(&meta, other)) {
+                uart_puts("No usable fallback image\r\n");
                 break;
             }
 
-            /* Seuls active_slot, le compteur et l'etat du slot
-               rejete changent. Les descriptions des deux images
-               restent intactes — c'est tout l'interet de les avoir
-               separees. */
-            metadata_t precedent = meta;
-            precedent.slot[actif].state = STATE_EMPTY;
-            precedent.active_slot       = autre;
-            precedent.boot_fail_count   = 0;
+            /* Only active_slot, the counter and the rejected slot's
+               state change. Both image descriptions stay intact —
+               which is the whole point of keeping them separate. */
+            metadata_t previous = meta;
+            previous.slot[active].state = STATE_EMPTY;
+            previous.active_slot       = other;
+            previous.boot_fail_count   = 0;
 
-            if (metadata_write(&precedent) == META_OK &&
-                slot_looks_bootable(SLOT_ADDR(autre))) {
-                uart_puts("Retour au slot ");
-                uart_putc((char)('A' + autre));
+            if (metadata_write(&previous) == META_OK &&
+                slot_looks_bootable(SLOT_ADDR(other))) {
+                uart_puts("Falling back to slot ");
+                uart_putc((char)('A' + other));
                 uart_puts("\r\n");
-                jump_to_application(SLOT_ADDR(autre));
+                jump_to_application(SLOT_ADDR(other));
             }
-            uart_puts("Aucune image de repli exploitable\r\n");
+            uart_puts("No usable fallback image\r\n");
             break;
         }
 
-        if (image_is_intact(&meta, actif)) {
-            /* Incrementer AVANT de sauter. Si l'application plante,
-               le compteur aura deja progresse au prochain reset.
-               L'incrementer apres n'aurait aucun effet, puisqu'on ne
-               revient jamais du saut. */
-            metadata_t essai = meta;
-            essai.boot_fail_count = (uint8_t)(meta.boot_fail_count + 1U);
-            metadata_write(&essai);
+        if (image_is_intact(&meta, active)) {
+            /* Increment BEFORE jumping. If the application crashes,
+               the counter has already advanced by the next reset.
+               Incrementing afterwards would have no effect, since the
+               jump never returns. */
+            metadata_t attempt = meta;
+            attempt.boot_fail_count = (uint8_t)(meta.boot_fail_count + 1U);
+            metadata_write(&attempt);
 
-            uart_puts("Essai ");
-            uart_dec(essai.boot_fail_count);
+            uart_puts("Attempt ");
+            uart_dec(attempt.boot_fail_count);
             uart_putc('/');
             uart_dec(MAX_BOOT_FAILURES);
             uart_puts("\r\n");
 
             update_mode(BOOT_WAIT_MS);
-            jump_to_application(SLOT_ADDR(actif));
+            jump_to_application(SLOT_ADDR(active));
         }
-        uart_puts("Image en test invalide\r\n");
+        uart_puts("Image under test is invalid\r\n");
         break;
 
     case STATE_IN_PROGRESS:
-        uart_puts("Transfert interrompu detecte\r\n");
+        uart_puts("Interrupted transfer detected\r\n");
         break;
 
     case STATE_EMPTY:
     default:
-        uart_puts("Aucun firmware installe\r\n");
+        uart_puts("No firmware installed\r\n");
         break;
     }
 
-    /* Tous les chemins qui n'ont pas saute aboutissent ici : il n'y a
-       rien d'executable, on attend indefiniment une mise a jour. */
+    /* Every path that did not jump ends here: there is nothing
+       runnable, so wait indefinitely for an update. */
     update_mode(0);
 
     while (1) {

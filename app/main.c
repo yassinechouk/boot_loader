@@ -7,53 +7,51 @@
 #include "iwdg.h"
 
 /*
- * Application — demonstration du cycle de mise a jour.
+ * Application — demonstrates the update lifecycle.
  *
- * Auto-confirmation
+ * Self-confirmation
  * -----------------
- * Le bootloader saute vers une image en TESTING apres avoir
- * incremente son compteur d'echecs. Si l'application ne fait rien,
- * ce compteur atteint le seuil au bout de quelques redemarrages et
- * le bootloader bascule sur le slot precedent.
+ * The bootloader jumps to a TESTING image after incrementing its
+ * failure counter. If the application does nothing, that counter
+ * reaches the threshold after a few restarts and the bootloader
+ * switches back to the previous slot.
  *
- * C'est le mecanisme meme du rollback : un CRC correct prouve
- * l'integrite de l'image, pas son bon fonctionnement. Un firmware
- * transmis sans la moindre corruption peut planter des sa premiere
- * seconde.
+ * That is the rollback mechanism itself: a correct CRC proves the
+ * image's integrity, not its correctness. A firmware transmitted
+ * without a single corrupted bit can still crash within its first
+ * second.
  *
- * L'application doit donc confirmer elle-meme qu'elle demarre :
- * passer l'etat a VALID et remettre le compteur a zero. Sans cette
- * confirmation, aucun rollback n'est possible — mais sans elle non
- * plus, aucun firmware ne tient au-dela de trois demarrages.
+ * The application must therefore confirm its own start-up: set the
+ * state to VALID and clear the counter. Without that confirmation no
+ * rollback is possible — but without it, no firmware survives past
+ * three boots either.
  *
- * Quand confirmer
+ * When to confirm
  * ---------------
- * Confirmer des la premiere ligne du main() viderait le mecanisme de
- * son sens : une application qui plante en cours de route serait
- * quand meme declaree valide.
+ * Confirming on the first line of main() would empty the mechanism
+ * of meaning: an application that crashes moments later would still
+ * have been declared healthy.
  *
- * Ce qui constitue un demarrage reussi depend du produit. Ici on
- * attend qu'un cycle applicatif complet se soit deroule. Un vrai
- * systeme confirmerait apres avoir verifie ses peripheriques, obtenu
- * une communication, ou atteint tout autre critere pertinent.
+ * What counts as a successful start depends on the product. Here a
+ * few complete application cycles are required. A real system would
+ * confirm after checking its peripherals, establishing a link, or
+ * meeting whatever criterion is meaningful for it.
  *
- * Watchdog herite
- * ---------------
- * Le bootloader a demarre l'IWDG avant de sauter, et celui-ci ne
- * peut plus etre arrete. Cette application doit donc le nourrir,
- * faute de quoi elle sera resetee au bout de trois secondes — ce qui
- * fera progresser le compteur d'echecs et, au bout de trois
- * tentatives, declenchera le rollback.
+ * Inherited watchdog
+ * ------------------
+ * The bootloader started the IWDG before jumping, and it can no
+ * longer be stopped. This application must therefore refresh it, or
+ * it will be reset after three seconds — which advances the failure
+ * counter and, after three attempts, triggers rollback.
  *
- * C'est le mecanisme lui-meme : une application qui se fige n'a
- * aucun moyen de continuer a nourrir, donc son echec est detecte
- * sans qu'elle ait a le signaler.
+ * That is the mechanism working as intended: an application that
+ * hangs has no way to keep refreshing, so its failure is detected
+ * without it having to report anything.
  *
- * Le nourrissage est ici conditionne a la progression du cycle
- * applicatif. Nourrir inconditionnellement ne detecterait qu'un
- * blocage complet : une application bouclant sur une portion de code
- * contenant l'appel continuerait de rassurer le watchdog tout en ne
- * faisant rien d'utile.
+ * Refreshing here is conditional on the application cycle having
+ * advanced. An unconditional refresh would only catch a complete
+ * hang: a program looping over a section that happens to contain the
+ * call would keep the watchdog quiet while doing nothing useful.
  */
 
 #define RCC_BASE            0x40021000UL
@@ -76,12 +74,12 @@
 
 #define LED_PIN             5
 
-/* Nombre de cycles applicatifs avant de se declarer sain. */
+/* Application cycles required before declaring the image healthy. */
 #define CYCLES_AVANT_CONFIRMATION   3
 
 
 /* ----------------------------------------------------------------
- * UART minimal — l'application n'a pas besoin de recevoir
+ * Minimal UART — the application never needs to receive
  * ---------------------------------------------------------------- */
 
 static void uart_init(void)
@@ -146,24 +144,24 @@ static void delay(volatile uint32_t n)
 
 
 /* ----------------------------------------------------------------
- * Determination du slot d'execution
+ * Determining which slot is executing
  * ---------------------------------------------------------------- */
 
 static uint8_t slot_courant(void)
 {
-    /* SCB_VTOR contient l'adresse de la table des vecteurs, que le
-       bootloader a positionnee avant de sauter. Elle designe donc le
-       debut du slot en cours d'execution.
-    
-       Cette introspection permet a l'application de savoir ou elle
-       tourne sans que personne ne le lui dise — utile pour verifier
-       que le bon binaire a ete envoye au bon emplacement. */
+    /* SCB_VTOR holds the vector table address, set by the bootloader
+       just before jumping. It therefore points at the start of the
+       slot currently executing.
+
+       This introspection lets the application know where it runs
+       without being told — useful to confirm that the right binary
+       reached the right slot. */
     return (SCB_VTOR >= SLOT_B_ADDR) ? SLOT_B : SLOT_A;
 }
 
 
 /* ----------------------------------------------------------------
- * Confirmation de bon demarrage
+ * Start-up confirmation
  * ---------------------------------------------------------------- */
 
 static void confirmer_demarrage(void)
@@ -171,33 +169,33 @@ static void confirmer_demarrage(void)
     metadata_t meta;
 
     if (!metadata_read(&meta)) {
-        uart_puts("  metadonnees illisibles, confirmation impossible\r\n");
+        uart_puts("  metadata unreadable, cannot confirm\r\n");
         return;
     }
 
     uint8_t moi = slot_courant();
 
     if (meta.slot[moi].state == STATE_VALID && meta.boot_fail_count == 0U) {
-        uart_puts("  deja confirmee\r\n");
+        uart_puts("  already confirmed\r\n");
         return;
     }
 
-    /* Seul l'etat de MON slot change. Celui de l'autre decrit une
-       image que je ne connais pas et qui doit rester utilisable
-       comme repli. */
+    /* Only MY slot's state changes. The other one describes an image
+       this build knows nothing about, and which must stay usable as a
+       fallback. */
     meta.slot[moi].state = STATE_VALID;
     meta.boot_fail_count = 0;
 
     if (metadata_write(&meta) == META_OK) {
-        uart_puts("  demarrage confirme : etat VALID, compteur remis a zero\r\n");
+        uart_puts("  start-up confirmed: state VALID, counter cleared\r\n");
     } else {
-        uart_puts("  echec d'ecriture des metadonnees\r\n");
+        uart_puts("  metadata write failed\r\n");
     }
 }
 
 
 /* ----------------------------------------------------------------
- * Verification de sa propre integrite
+ * Self-integrity check
  * ---------------------------------------------------------------- */
 
 static void verifier_image(const metadata_t *meta)
@@ -207,28 +205,28 @@ static void verifier_image(const metadata_t *meta)
     const slot_info_t *info = &meta->slot[moi];
 
     if (info->size == 0U || info->size > SLOT_SIZE) {
-        uart_puts("  taille invalide, verification ignoree\r\n");
+        uart_puts("  invalid size, check skipped\r\n");
         return;
     }
 
     uint32_t calcule = crc32_compute((const uint8_t *)base, info->size);
 
-    uart_puts("  CRC calcule : ");
+    uart_puts("  computed CRC : ");
     uart_hex32(calcule);
-    uart_puts("\r\n  CRC attendu : ");
+    uart_puts("\r\n  expected CRC : ");
     uart_hex32(info->crc32);
-    uart_puts(calcule == info->crc32 ? "   concordant\r\n"
-                                     : "   DIVERGENT\r\n");
+    uart_puts(calcule == info->crc32 ? "   match\r\n"
+                                     : "   MISMATCH\r\n");
 }
 
 
 /* ----------------------------------------------------------------
- * Point d'entree
+ * Entry point
  * ---------------------------------------------------------------- */
 
 int main(void)
 {
-    /* LED sur PA5 */
+    /* User LED on PA5 */
     RCC_AHB2ENR |= (1U << 0);
     GPIOA_MODER &= ~(3U << (LED_PIN * 2));
     GPIOA_MODER |=  (1U << (LED_PIN * 2));
@@ -249,7 +247,7 @@ int main(void)
 
     metadata_t meta;
     if (metadata_read(&meta)) {
-        uart_puts("Etat        : ");
+        uart_puts("State       : ");
         switch (meta.slot[slot_courant()].state) {
         case STATE_EMPTY:       uart_puts("EMPTY");       break;
         case STATE_IN_PROGRESS: uart_puts("IN_PROGRESS"); break;
@@ -259,15 +257,15 @@ int main(void)
         }
         uart_puts("\r\nVersion     : ");
         uart_hex32(meta.slot[slot_courant()].version);
-        uart_puts("\r\nEchecs boot : ");
+        uart_puts("\r\nBoot fails  : ");
         uart_dec(meta.boot_fail_count);
-        uart_puts("\r\n\r\nVerification de l'image :\r\n");
+        uart_puts("\r\n\r\nImage verification:\r\n");
         verifier_image(&meta);
     } else {
-        uart_puts("Aucune metadonnee lisible\r\n");
+        uart_puts("No readable metadata\r\n");
     }
 
-    uart_puts("\r\nCycles applicatifs avant confirmation : ");
+    uart_puts("\r\nApplication cycles before confirming: ");
     uart_dec(CYCLES_AVANT_CONFIRMATION);
     uart_puts("\r\n\r\n");
 
@@ -281,12 +279,11 @@ int main(void)
 
         cycle++;
 
-        /* Nourrissage conditionnel : le watchdog n'est rassure que
-           si le compteur de cycles a reellement progresse depuis le
-           dernier passage. Le critere est trivial ici, mais c'est la
-           forme qu'il faut : sous RTOS, une tache de supervision
-           verifierait de la meme facon que chaque autre tache a
-           avance. */
+        /* Conditional refresh: the watchdog is only reassured if the
+           cycle counter has genuinely advanced since the last pass.
+           The criterion is trivial here, but the shape is the right
+           one — under an RTOS a supervisor task would check in the
+           same way that every other task has made progress. */
         iwdg_feed_if(cycle != dernier_cycle_vu);
         dernier_cycle_vu = cycle;
 
@@ -294,11 +291,11 @@ int main(void)
         uart_dec(cycle);
         uart_puts("\r\n");
 
-        /* La confirmation n'intervient qu'apres plusieurs cycles
-           complets. Confirmer des la premiere ligne du main()
-           validerait une application qui plante juste apres. */
+        /* Confirmation only happens after several complete cycles.
+           Confirming on the first line of main() would validate an
+           application that crashes immediately afterwards. */
         if (!confirmee && cycle >= CYCLES_AVANT_CONFIRMATION) {
-            uart_puts("\r\nConfirmation :\r\n");
+            uart_puts("\r\nConfirmation:\r\n");
             confirmer_demarrage();
             uart_puts("\r\n");
             confirmee = 1;
