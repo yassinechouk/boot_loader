@@ -58,11 +58,62 @@ def progress_bar(current, total, width=40):
     sys.stdout.flush()
 
 
+# Mirror of shared/metadata.h -- only what the estimate needs.
+FLASH_PAGE_SIZE = 2048
+
+
 def estimated_duration(size_bytes, baudrate=115200):
-    """Each byte occupies 10 bits on the line: start + 8 data + stop."""
-    frames = (size_bytes + p.DATA_BLOCK_SIZE - 1) // p.DATA_BLOCK_SIZE
-    total = size_bytes + frames * p.FRAME_OVERHEAD
-    return total * 10 / baudrate
+    """
+    Rough transfer time. Each byte occupies 10 bits: start + 8 + stop.
+
+    Counting only the outgoing payload under-predicts by about half,
+    which is worse than not predicting at all. Three things it missed:
+    every block is answered by an ACK frame travelling the other way,
+    the board is not listening while it programs, and a 2 KB page has
+    to be erased every eighth block.
+
+    The flash constants are fitted to measurements on the STM32L476 at
+    115200 baud. This is an estimate, not a derivation.
+    """
+    blocks = (size_bytes + p.DATA_BLOCK_SIZE - 1) // p.DATA_BLOCK_SIZE
+
+    on_wire = (size_bytes
+               + blocks * p.FRAME_OVERHEAD      # outgoing framing
+               + blocks * p.FRAME_OVERHEAD      # ACK coming back
+               + 6 * p.FRAME_OVERHEAD + 28)     # GET_INFO/START/END
+    serial_s = on_wire * 10 / baudrate
+
+    pages = (size_bytes + FLASH_PAGE_SIZE - 1) // FLASH_PAGE_SIZE
+    flash_s = pages * 0.022 + (size_bytes / 8) * 0.00028
+
+    return serial_s + flash_s
+
+
+def next_version(current: int) -> int:
+    """
+    One patch above whatever the board reports it is running.
+
+    The version field exists to tell two images apart. A fixed default
+    meant every image flashed during development stamped itself with
+    the same number, so the field said nothing -- and both slots ended
+    up claiming v0.1.0, which is exactly the moment you want to know
+    which is which.
+
+    Deriving it from GET_INFO keeps versions distinct and ordered with
+    nothing to remember. It also puts the question on the side of the
+    link that actually knows the answer, the same reasoning that leaves
+    slot selection to the bootloader.
+    """
+    major = (current >> 16) & 0xFF
+    minor = (current >> 8) & 0xFF
+    patch = (current & 0xFF) + 1
+
+    if patch > 0xFF:
+        patch, minor = 0, minor + 1
+    if minor > 0xFF:
+        minor, major = 0, (major + 1) & 0xFF
+
+    return (major << 16) | (minor << 8) | patch
 
 
 # ---------------------------------------------------------------
@@ -125,6 +176,8 @@ def send_firmware(tr, firmware: bytes, slot: int, version: int,
     info(f"CRC32    : 0x{crc:08X}")
     info(f"blocks   : {len(blocks)} x {p.DATA_BLOCK_SIZE}")
     info(f"target   : slot {'AB'[slot]}")
+    info(f"version  : v{(version >> 16) & 0xFF}."
+         f"{(version >> 8) & 0xFF}.{version & 0xFF}")
     info(f"estimate : {estimated_duration(len(firmware), baudrate):.1f} s")
     print()
 
@@ -210,8 +263,9 @@ def main():
     ap.add_argument("--file", help="explicit binary")
     ap.add_argument("--slot", choices=["A", "B"],
                     help="force target slot (with --file)")
-    ap.add_argument("--version", default="0.1.0",
-                    help="firmware version, format M.m.p")
+    ap.add_argument("--version", default=None,
+                    help="firmware version M.m.p "
+                         "(default: one patch above the board's)")
     ap.add_argument("--info", action="store_true",
                     help="query the board without sending anything")
     ap.add_argument("--verbose", action="store_true")
@@ -221,11 +275,15 @@ def main():
     if not args.info and not args.dir and not args.file:
         ap.error("specify --dir, --file or --info")
 
-    try:
-        maj, mnr, pch = (int(x) for x in args.version.split("."))
-        version = (maj << 16) | (mnr << 8) | pch
-    except ValueError:
-        ap.error("version expected in M.m.p format")
+    # Validated here so a typo fails before touching the board; the
+    # value is only resolved once GET_INFO has said what is installed.
+    explicit_version = None
+    if args.version is not None:
+        try:
+            maj, mnr, pch = (int(x) for x in args.version.split("."))
+        except ValueError:
+            ap.error("version expected in M.m.p format")
+        explicit_version = (maj << 16) | (mnr << 8) | pch
 
     print(Term.c("\nFirmware update", Term.BOLD))
     print(f"  port {args.port} @ {args.baud} baud")
@@ -250,6 +308,9 @@ def main():
             if args.info:
                 print()
                 return 0
+
+            version = (explicit_version if explicit_version is not None
+                       else next_version(nfo.fw_version))
 
             # --- choose binary ---
             if args.file:

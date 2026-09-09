@@ -11,7 +11,7 @@ automatically, with no host involvement and no button press.
 
 ```
 ========================================
-  BOOTLOADER v0.1.0
+  BOOTLOADER v0.2.0
 ========================================
 Reset caused by the watchdog
 Active slot : B
@@ -131,7 +131,7 @@ python3 ../tools/flash.py --port /dev/ttyACM0 --dir . --version 1.0.0
 ```
 Board status
   protocol       : v1
-  bootloader     : v0.1.0
+  bootloader     : v0.2.0
   active slot    : A
   free slot      : B
   state          : VALID
@@ -423,7 +423,7 @@ Reset expected in ~3 s.
 [silence, then]
 
 ========================================
-  BOOTLOADER v0.1.0
+  BOOTLOADER v0.2.0
 ========================================
 Reset caused by the watchdog
 State       : TESTING

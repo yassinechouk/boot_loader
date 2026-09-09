@@ -152,7 +152,13 @@ typedef struct {
 /* =========================================================
  * Bootloader version
  * Format: 0x00MMmmpp  (major, minor, patch)
+ *
+ * 0.2.0 added the boot request flag. The bump is not cosmetic: a
+ * 0.1.0 bootloader has _estack at the very top of RAM, so its own
+ * first stack push lands on the flag word and destroys the request
+ * before it can be read. The host tool reports bl_version so that
+ * "the trigger does nothing" has a visible cause.
  * ========================================================= */
-#define BOOTLOADER_VERSION      0x00000100UL   /* 0.1.0 */
+#define BOOTLOADER_VERSION      0x00000200UL   /* 0.2.0 */
 
 #endif /* METADATA_H */

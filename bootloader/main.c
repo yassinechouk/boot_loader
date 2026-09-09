@@ -31,6 +31,25 @@
  *   TESTING         -> jump, after incrementing the failure counter.
  *                      Past the threshold, roll back to the other slot.
  *
+ * Boot request
+ * ------------
+ * Before jumping, the bootloader listens on the serial link for two
+ * seconds, so that a host can take over a board that is otherwise
+ * about to run. That window is short by design -- it costs two
+ * seconds on every boot -- and hitting it means resetting the board
+ * and racing it.
+ *
+ * The boot request flag removes the race without lengthening the
+ * default window. A host with a debugger, or the application itself,
+ * writes a magic word to the last RAM word and resets; RAM survives
+ * a system reset, so the bootloader finds it and stretches the same
+ * listen window to thirty seconds. See shared/boot_request.h.
+ *
+ * Deliberately, the flag does not change WHAT the bootloader does,
+ * only how long it waits. The boot decision below runs unchanged, so
+ * an update that never arrives costs thirty seconds and then the
+ * board boots exactly as it would have.
+ *
  * The TESTING mechanism
  * ---------------------
  * A correct CRC proves an image's integrity, not its correctness: a
@@ -215,9 +234,9 @@ static int image_is_intact(const metadata_t *meta, uint8_t slot)
 
     /* CRC recomputed on every boot. A flash cell can degrade over
        time; better to find out here than to execute corrupted code. */
-    uint32_t calcule = crc32_compute((const uint8_t *)base, info->size);
+    uint32_t computed = crc32_compute((const uint8_t *)base, info->size);
 
-    return (calcule == info->crc32);
+    return (computed == info->crc32);
 }
 
 
@@ -383,7 +402,7 @@ int main(void)
 
     case STATE_VALID:
         if (image_is_intact(&meta, active)) {
-            update_mode(BOOT_WAIT_MS);   /* give the host a chance */
+            update_mode(listen_ms);      /* give the host a chance */
             jump_to_application(SLOT_ADDR(active));
         }
         uart_puts("Image invalid despite VALID state\r\n");
@@ -440,7 +459,7 @@ int main(void)
             uart_dec(MAX_BOOT_FAILURES);
             uart_puts("\r\n");
 
-            update_mode(BOOT_WAIT_MS);
+            update_mode(listen_ms);
             jump_to_application(SLOT_ADDR(active));
         }
         uart_puts("Image under test is invalid\r\n");

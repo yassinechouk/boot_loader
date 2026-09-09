@@ -208,13 +208,22 @@ static void on_start_update(uint16_t seq, const uint8_t *data, uint16_t len)
     }
     /* Preserve the current state: the OTHER slot's information must
        survive, otherwise a later rollback would no longer be able to
-       describe the fallback image. */
+       describe the fallback image.
+
+       boot_fail_count is preserved for the same reason. It describes
+       the slot currently on trial, which is not the one being written
+       here, and a transfer that starts is not evidence that that slot
+       works. Clearing it here would let a host that merely BEGINS an
+       update -- and then fails, or is interrupted -- reset the trial
+       counter of a firmware that is busy failing, pushing rollback
+       further away every time. on_end_update() clears it once the new
+       image is actually in flash, which is the point at which the
+       counter genuinely no longer describes anything. */
     metadata_t current;
     if (metadata_read(&current)) {
         updated = current;
     }
     updated.active_slot        = active;   /* unchanged until validated */
-    updated.boot_fail_count    = 0;
     updated.slot[slot].size    = size;
     updated.slot[slot].crc32   = crc;
     updated.slot[slot].version = ver;
