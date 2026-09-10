@@ -123,26 +123,55 @@ make verify         # confirms each is linked to its own address
 
 ### Update over UART
 
-No reset button needed. A single command triggers the update from end to end:
+No reset button needed. A single command covers the full update — trigger,
+transfer, and verification:
 
 ```bash
 python3 tools/ota_flash.py
 ```
 
-What this does:
+There are two ways to trigger the update, depending on what hardware is
+available:
 
-1. Reads the `_boot_request` symbol from every built ELF and verifies they
-   agree on its address.
+#### Default: trigger via SWD (`--via-swd`)
+
+Requires the ST-Link to be connected (the on-board debugger on the Nucleo).
+
+1. Reads the `_boot_request` symbol from every built ELF and verifies all
+   three agree on its address.
 2. Opens the serial port **before** triggering, so the bootloader's
    confirmation line is never missed.
-3. Uses OpenOCD (SWD) to write a magic word into RAM and reset the board.
-4. Waits for the bootloader banner `OTA request accepted` — proof the
-   mechanism worked — then hands off to `flash.py`.
+3. Uses OpenOCD to write the magic word `0xDEADBEEF` into the last word of
+   RAM and issue a software reset — no button press.
+4. Waits for `OTA request accepted` from the bootloader, confirming the flag
+   survived the reset and the listen window was extended to 30 s.
+5. Hands off to `flash.py`, which queries the free slot and transfers the
+   matching binary.
 
-The bootloader finds the magic word on the next boot, clears it immediately,
-and stretches its listen window from 2 s to 30 s. The normal boot sequence
-(VALID / TESTING / rollback) runs unchanged — if no transfer arrives in time
-the board simply boots the existing application.
+#### No debugger: trigger via UART (`--via-uart`)
+
+Requires **only the USB cable** — nothing else. Works as long as the
+application is running its main loop.
+
+```bash
+python3 tools/ota_flash.py --via-uart
+```
+
+`ota_flash.py` holds the trigger character `'U'` on the serial line. The
+application requires **four consecutive polls** to see it exclusively before
+it sets the boot request flag and resets itself. A stray byte resets the
+streak, so an idle terminal cannot trigger it accidentally.
+
+Once the application resets, the bootloader finds the flag, clears it, and
+stretches its listen window to 30 s. The rest of the sequence is identical
+to the SWD path.
+
+---
+
+In both cases, the bootloader finds the magic word on the next boot, clears
+it immediately, and stretches its listen window from 2 s to 30 s. The normal
+boot sequence (VALID / TESTING / rollback) runs unchanged — if no transfer
+arrives in time the board simply boots the existing application.
 
 ```
 Board status
@@ -168,19 +197,6 @@ Verification
 
 The host never chooses the target slot. It asks the board which slot is free
 and sends the matching binary.
-
-#### Trigger over UART (no debugger)
-
-If the application is running and no ST-Link is available:
-
-```bash
-python3 tools/ota_flash.py --via-uart
-```
-
-`ota_flash.py` holds the trigger character `'U'` on the serial line. The
-application requires **four consecutive polls** to see it exclusively before
-resetting. A stray byte resets the streak, so an idle terminal cannot trigger
-it accidentally.
 
 #### Inspect without transferring
 
