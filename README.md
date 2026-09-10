@@ -7,7 +7,8 @@ The board receives a new firmware over UART, verifies it at three independent
 levels, installs it into a spare flash slot, and boots it on trial. If the new
 image fails to confirm that it started correctly, an independent watchdog
 resets the board and the bootloader rolls back to the previous image —
-automatically, with no host involvement and no button press.
+automatically, with no host involvement, no button press, and no physical
+access to the board.
 
 ```
 ========================================
@@ -58,6 +59,7 @@ table, runtime flash programming, and designing for interrupted operations.
 - Uses an independent watchdog so a hung application is detected without human
   intervention
 - Survives power loss at any point in the transfer
+- Triggers an update remotely — no reset button, no physical access required
 
 Everything is written directly against the hardware registers. No HAL, no
 CubeMX, no RTOS.
@@ -121,12 +123,26 @@ make verify         # confirms each is linked to its own address
 
 ### Update over UART
 
-Press the reset button, then within two seconds:
+No reset button needed. A single command triggers the update from end to end:
 
 ```bash
-cd app
-python3 ../tools/flash.py --port /dev/ttyACM0 --dir . --version 1.0.0
+python3 tools/ota_flash.py
 ```
+
+What this does:
+
+1. Reads the `_boot_request` symbol from every built ELF and verifies they
+   agree on its address.
+2. Opens the serial port **before** triggering, so the bootloader's
+   confirmation line is never missed.
+3. Uses OpenOCD (SWD) to write a magic word into RAM and reset the board.
+4. Waits for the bootloader banner `OTA request accepted` — proof the
+   mechanism worked — then hands off to `flash.py`.
+
+The bootloader finds the magic word on the next boot, clears it immediately,
+and stretches its listen window from 2 s to 30 s. The normal boot sequence
+(VALID / TESTING / rollback) runs unchanged — if no transfer arrives in time
+the board simply boots the existing application.
 
 ```
 Board status
@@ -153,7 +169,20 @@ Verification
 The host never chooses the target slot. It asks the board which slot is free
 and sends the matching binary.
 
-To inspect the board without transferring anything:
+#### Trigger over UART (no debugger)
+
+If the application is running and no ST-Link is available:
+
+```bash
+python3 tools/ota_flash.py --via-uart
+```
+
+`ota_flash.py` holds the trigger character `'U'` on the serial line. The
+application requires **four consecutive polls** to see it exclusively before
+resetting. A stray byte resets the streak, so an idle terminal cannot trigger
+it accidentally.
+
+#### Inspect without transferring
 
 ```bash
 python3 tools/flash.py --port /dev/ttyACM0 --info
@@ -506,9 +535,9 @@ with an ECDSA signature verified against a public key in a write-protected
 region. The transport would be unchanged; only the final validation step would
 differ.
 
-**Fixed update window.** The bootloader listens for two seconds after reset. A
-production device would need a way to force update mode — a button held at
-boot, or an application command that reboots into the bootloader.
+**Fixed update window.** The bootloader listens for two seconds after reset.
+The boot request flag extends this to thirty seconds on demand, via SWD or
+the UART trigger in the application. Physical button access is not required.
 
 **Dual binaries.** The host must hold two images per firmware version. Hardware
 with true bank remapping could use one.
